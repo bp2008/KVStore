@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="../BPUtil/BPUtil/BPUtil.csproj" />
+  <Project Path="KVStore/KVStore.csproj" />
+</Solution>

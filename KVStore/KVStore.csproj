@@ -1,0 +1,42 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<!-- Multi-targeting: the first TFM produces the Windows build, the second produces the cross-platform (Linux) build. -->
+		<TargetFrameworks>net10.0-windows7.0;net10.0</TargetFrameworks>
+		<Nullable>disable</Nullable>
+		<RootNamespace>KVStore</RootNamespace>
+		<NeutralLanguage>en-US</NeutralLanguage>
+		<GenerateAssemblyInfo>True</GenerateAssemblyInfo>
+		<!-- Pin PackageId before AssemblyName is overridden per-TFM below; Visual Studio's NuGet restore fails (NU1105) if PackageId differs across target frameworks. -->
+		<PackageId>$(AssemblyName)</PackageId>
+	</PropertyGroup>
+	
+	<!-- Windows build: WinForms service/tray UI. Output assembly is "KVStore.dll". -->
+	<PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-windows7.0'">
+		<OutputType>WinExe</OutputType>
+		<UseWindowsForms>True</UseWindowsForms>
+		<AssemblyName>KVStore</AssemblyName>
+	</PropertyGroup>
+	<!-- Cross-platform (Linux) build: headless console app. Output assembly is "KVStoreLinux.dll". -->
+	<PropertyGroup Condition="'$(TargetFramework)' == 'net10.0'">
+		<OutputType>Exe</OutputType>
+		<AssemblyName>KVStoreLinux</AssemblyName>
+		<DefineConstants>$(DefineConstants);LINUX</DefineConstants>
+	</PropertyGroup>
+	<!-- The WinForms UI (Windows service/tray UI and its resources) is only compiled for the Windows build. -->
+	<ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+		<Compile Remove="Properties\**" />
+		<Compile Remove="ServiceUI\**" />
+		<EmbeddedResource Remove="Properties\**" />
+		<EmbeddedResource Remove="ServiceUI\**" />
+		<None Remove="Properties\**" />
+		<None Remove="ServiceUI\**" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\..\BPUtil\BPUtil\BPUtil.csproj" />
+	</ItemGroup>
+</Project>

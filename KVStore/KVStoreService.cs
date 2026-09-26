@@ -1,0 +1,229 @@
+using BPUtil;
+using Newtonsoft.Json;
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Diagnostics;
+using System.Linq;
+using System.Net;
+using System.ServiceProcess;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace KVStore
+{
+	/// <summary>
+	/// Singleton service class for KVStore.
+	/// </summary>
+	public partial class KVStoreService
+#if !LINUX
+		: ServiceBase
+#endif
+	{
+		/// <summary>
+		/// Reference to the constructed KVStoreService instance. Null if none has been constructed yet.
+		/// </summary>
+		public static KVStoreService service;
+		/// <summary>
+		/// The Admin Console web server.
+		/// </summary>
+		private static AdminWebServer adminWebServer;
+		/// <summary>
+		/// This is set = true when the service's OnStop method is called.
+		/// </summary>
+		public static bool abort { get; private set; } = false;
+		public KVStoreService()
+		{
+			if (service != null)
+				throw new Exception("Unable to create KVStoreService because one was already created.");
+
+			InitializeSettings();
+
+#if !LINUX
+			InitializeComponent();
+#endif
+
+			service = this;
+		}
+
+		/// <summary>
+		/// Loads the settings file, saves it if it does not exist, and then validates the settings and ensures the admin console is available.
+		/// </summary>
+		public static void InitializeSettings()
+		{
+			Settings s = new Settings();
+			s.Load();
+			string settingsOriginal = JsonConvert.SerializeObject(s);
+			ValidateSettings(s);
+			string settingsAfterValidation = JsonConvert.SerializeObject(s);
+
+			if (settingsOriginal != settingsAfterValidation)
+				TaskHelper.RunAsyncCodeSafely(() => KVStoreService.SaveNewSettings(s));
+			else
+			{
+				staticSettings = s;
+				staticSettings.SaveIfNoExist();
+			}
+
+			ActivateSettingsChanges(s);
+		}
+		/// <summary>
+		/// Logs the Exception to file.
+		/// </summary>
+		/// <param name="ex">Exception to log.</param>
+		public static void ReportError(Exception ex)
+		{
+			Logger.Debug(ex);
+		}
+
+		/// <summary>
+		/// Logs the Exception to file.
+		/// </summary>
+		/// <param name="ex">Exception to log.</param>
+		/// <param name="additionalInformation">Optional additional information to log with the exception.</param>
+		public static void ReportError(Exception ex, string additionalInformation)
+		{
+			Logger.Debug(ex, additionalInformation);
+		}
+		/// <summary>
+		/// Logs the message to file.
+		/// </summary>
+		/// <param name="message">Message to log.</param>
+		public static void ReportError(string message)
+		{
+			Logger.Debug(message);
+		}
+
+#if LINUX
+		protected void OnStart(string[] args)
+		{
+			DoStart(args);
+		}
+
+		protected void OnStop()
+		{
+			DoStop();
+		}
+#else
+		protected override void OnStart(string[] args)
+		{
+			DoStart(args);
+		}
+
+		protected override void OnStop()
+		{
+			DoStop();
+		}
+#endif
+		protected void DoStart(string[] args)
+		{
+			Logger.Info(Globals.AssemblyName + " " + Globals.AssemblyVersion + " Starting Up");
+			adminWebServer = new AdminWebServer();
+			ActivateSettingsChanges(MakeLocalSettingsReference());
+		}
+
+		protected void DoStop()
+		{
+			Logger.Info(Globals.AssemblyName + " " + Globals.AssemblyVersion + " Shutting Down");
+			abort = true;
+			adminWebServer?.Stop();
+		}
+
+		/// <summary>
+		/// Updates the admin web server bindings according to the current configuration.  It is safe to call this even if bindings have not changed.
+		/// </summary>
+		public static void UpdateAdminWebServerBindings()
+		{
+			adminWebServer?.UpdateBindings();
+		}
+		#region Settings
+		/// <summary>
+		/// <para>Static settings object. To retain maximum performance and exception safety without locks, some usage constraints are necessary:</para>
+		/// <para>* To read the settings, call MakeLocalSettingsReference and store the returned value in a local variable.  Treat the fields/properties of the settings object as read-only.</para>
+		/// <para>* To write/change anything in settings, make a local COPY of the settings object via CloneSettingsObjectSlow(), edit the copy, then pass it to SaveNewSettings().</para>
+		/// </summary>
+		private static Settings staticSettings;
+
+		/// <summary>
+		/// Returns a reference to the settings object which must be treated as read-only.  Store the returned value in a local variable and use it from there, because calling this method is not guaranteed to return the same object each time.  Failure to treat the returned object as read-only will yield race conditions and errors in other threads.
+		/// </summary>
+		/// <returns></returns>
+		public static Settings MakeLocalSettingsReference()
+		{
+			return staticSettings;
+		}
+		/// <summary>
+		/// Returns a detached copy of the settings.  You can modify the returned object and send it to SaveNewSettings().
+		/// </summary>
+		/// <returns></returns>
+		public static Settings CloneSettingsObjectSlow()
+		{
+			return JsonConvert.DeserializeObject<Settings>(JsonConvert.SerializeObject(staticSettings));
+		}
+		private static object settingsSaveLock = new object();
+		/// <summary>
+		/// Replaces the internal settings object with this one and saves the settings to disk in a thread-safe manner.  You should not modify the settings object again after calling this; instead, make a new clone of the settings object if you need to make more changes.
+		/// </summary>
+		/// <param name="newSettings">A clone of the settings object.  The clone contains changes that you want to save.</param>
+		/// <param name="cancellationToken">Cancellation Token</param>
+		public static async Task SaveNewSettings(Settings newSettings, CancellationToken cancellationToken = default)
+		{
+			ValidateSettings(newSettings);
+
+			await TaskHelper.RunBlockingCodeSafely(() =>
+			{
+				lock (settingsSaveLock)
+				{
+					staticSettings = newSettings;
+					newSettings.Save();
+				}
+			}, cancellationToken).ConfigureAwait(false);
+
+			ActivateSettingsChanges(newSettings);
+		}
+		/// <summary>
+		/// <para>Applies settings from the given settings object to this service:</para>
+		/// <para>* updates admin web server bindings</para>
+		/// </summary>
+		/// <param name="s">Settings object to apply settings from.</param>
+		private static void ActivateSettingsChanges(Settings s)
+		{
+			UpdateAdminWebServerBindings();
+		}
+		/// <summary>
+		/// Validate the settings file and repair simple problems, including creating/repairing admin console access (a random admin password is generated if none is set).  Throw an exception if anything is invalid that can't be cleanly repaired automatically.  Because this can modify the settings, this should never be passed the static settings instance, and should only be called just prior to saving the settings.  This method is automatically called by <see cref="SaveNewSettings"/>.
+		/// </summary>
+		/// <param name="s">Settings instance containing settings that need to be validated.</param>
+		/// <exception cref="Exception">If validation fails.</exception>
+		public static void ValidateSettings(Settings s)
+		{
+			if (s == staticSettings)
+				throw new Exception("Application error: Refusing to run ValidateSettings on the static settings instance due to causing race conditions.");
+
+			// Validate Admin Console
+			if (!string.IsNullOrWhiteSpace(s.adminIpAddress))
+			{
+				s.adminIpAddress = s.adminIpAddress.Trim();
+				if (!IPAddress.TryParse(s.adminIpAddress, out IPAddress ignored))
+					throw new Exception("adminIpAddress \"" + s.adminIpAddress + "\" is not a valid IP address.");
+			}
+
+			if (!s.adminHttpPortValid())
+				s.adminHttpPort = -1;
+			if (!s.adminHttpsPortValid())
+				s.adminHttpsPort = -1;
+			if (!s.adminHttpPortValid() && !s.adminHttpsPortValid())
+				s.adminHttpsPort = Settings.DefaultAdminPort;
+
+			if (string.IsNullOrWhiteSpace(s.adminUser))
+				s.adminUser = "kvadmin";
+			s.adminUser = s.adminUser.Trim();
+
+			if (string.IsNullOrEmpty(s.adminPass))
+				s.adminPass = StringUtil.GetRandomAlphaNumericString(16);
+		}
+		#endregion
+	}
+}
