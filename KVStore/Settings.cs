@@ -1,6 +1,7 @@
 using BPUtil;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -46,6 +47,61 @@ namespace KVStore
 		protected override string SerializeToJson(object obj)
 		{
 			return Newtonsoft.Json.JsonConvert.SerializeObject(obj, Newtonsoft.Json.Formatting.Indented);
+		}
+
+		/// <summary>
+		/// Saves this instance to file.  Returns true if successful.  On Linux, the file is kept at permission mode 0600 (owner read/write only) because it contains the Admin Console password.
+		/// </summary>
+		/// <param name="filePath">Optional file path. If null, the default file path is used.</param>
+		/// <returns></returns>
+		public override bool Save(string filePath = null)
+		{
+			if (filePath == null)
+				filePath = GetDefaultFilePath();
+			RestrictFilePermissions(filePath, true);
+			return base.Save(filePath);
+		}
+
+		/// <summary>
+		/// Loads this instance from file.  Returns true if successful.  May throw an exception if the file format is invalid.  On Linux, the file is first restricted to permission mode 0600 (owner read/write only) because it contains the Admin Console password.
+		/// </summary>
+		/// <param name="filePath">Optional file path. If null, the default file path is used.</param>
+		/// <returns></returns>
+		public override bool Load(string filePath = null)
+		{
+			if (filePath == null)
+				filePath = GetDefaultFilePath();
+			RestrictFilePermissions(filePath, false);
+			return base.Load(filePath);
+		}
+
+		/// <summary>
+		/// On Linux, restricts the file to permission mode 0600 (owner read/write only) if it has any broader permissions.  If the file does not exist and <paramref name="createIfMissing"/> is true, an empty file is created with mode 0600 so that the settings are never written to a file which other users can read, even briefly.  Does nothing on Windows.
+		/// </summary>
+		/// <param name="filePath">Path to the settings file.</param>
+		/// <param name="createIfMissing">If true, the file is created if it does not exist.</param>
+		private static void RestrictFilePermissions(string filePath, bool createIfMissing)
+		{
+			if (OperatingSystem.IsWindows())
+				return;
+			const UnixFileMode ownerReadWrite = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+			try
+			{
+				if (File.Exists(filePath))
+				{
+					if ((File.GetUnixFileMode(filePath) & ~ownerReadWrite) != 0)
+						File.SetUnixFileMode(filePath, ownerReadWrite);
+				}
+				else if (createIfMissing)
+				{
+					Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(filePath)));
+					using (new FileStream(filePath, new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, UnixCreateMode = ownerReadWrite })) { }
+				}
+			}
+			catch (Exception ex)
+			{
+				Logger.Debug(ex, "Unable to restrict permissions of \"" + filePath + "\" to 0600.");
+			}
 		}
 
 		/// <summary>
