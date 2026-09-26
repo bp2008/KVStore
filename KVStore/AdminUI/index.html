@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="robots" content="noindex, nofollow">
+	<title>KVStore Admin Console</title>
+	<link rel="stylesheet" href="admin.css">
+	<script src="admin.js" defer></script>
+</head>
+<body>
+	<header class="topbar">
+		<div class="brand">KVStore <span class="muted">Admin Console</span></div>
+		<nav id="nav">
+			<a href="#dashboard" data-page="dashboard">Dashboard</a>
+			<a href="#buckets" data-page="buckets">Buckets</a>
+			<a href="#settings" data-page="settings">Settings</a>
+			<a href="#danger" data-page="danger">Danger Zone</a>
+		</nav>
+		<div class="version muted" id="version"></div>
+	</header>
+	<div id="toasts" aria-live="polite"></div>
+	<main>
+		<!-- Dashboard -->
+		<section id="page-dashboard" class="page">
+			<div id="recoveryBanner" class="banner"></div>
+			<div class="toolbar">
+				<h1>Dashboard</h1>
+				<label class="inline"><input type="checkbox" id="autoRefresh" checked> Auto-refresh</label>
+				<button type="button" id="btnRefresh">Refresh</button>
+				<span class="muted" id="dashUpdated"></span>
+			</div>
+			<div class="tiles" id="tiles"></div>
+			<h2>Buckets</h2>
+			<div class="tablewrap"><table id="bucketStats"></table></div>
+			<p class="muted small" id="itemStatsNote"></p>
+			<h2>Operations</h2>
+			<div class="tablewrap"><table id="counters"></table></div>
+			<h2>Rate limiters</h2>
+			<div class="tablewrap"><table id="limiters"></table></div>
+			<h2>Process</h2>
+			<div class="tablewrap"><table id="process"></table></div>
+		</section>
+
+		<!-- Buckets -->
+		<section id="page-buckets" class="page">
+			<div class="toolbar">
+				<h1>Buckets</h1>
+				<button type="button" id="btnNewBucket">New bucket</button>
+			</div>
+			<p class="muted">A bucket is a named namespace with its own limits.  Clients can only use buckets that exist here; the public API never creates buckets.  Names are 1&ndash;32 characters from the base32 alphabet (a&ndash;z, 2&ndash;7) and are not case-sensitive.</p>
+			<div class="tablewrap"><table id="bucketList"></table></div>
+			<form id="bucketForm" class="card hidden" autocomplete="off">
+				<h2 id="bucketFormTitle">Bucket</h2>
+				<input type="hidden" id="bf_originalName">
+				<div class="grid">
+					<label>Name <input type="text" id="bf_name" maxlength="32" required pattern="[A-Za-z2-7]{1,32}"></label>
+					<label class="inline"><input type="checkbox" id="bf_enabled"> Enabled</label>
+					<label>Default TTL (seconds) <input type="number" id="bf_defaultTtlSeconds" min="60" step="1" required></label>
+					<label>Maximum TTL (seconds) <input type="number" id="bf_maxTtlSeconds" min="60" step="1" required></label>
+					<label>Maximum item size (bytes) <input type="number" id="bf_maxItemSizeBytes" min="1" step="1" required></label>
+					<label>Maximum item count <input type="number" id="bf_maxItemCount" min="1" step="1" required></label>
+					<label>Maximum total bytes <input type="number" id="bf_maxTotalBytes" min="1" step="1" required></label>
+					<label class="wide">Notes (admin only) <textarea id="bf_notes" rows="2"></textarea></label>
+				</div>
+				<p class="muted small">When a bucket reaches its item count or total bytes limit, the items closest to expiring (expired items first) are evicted to make room.  Renaming a bucket moves its items to the new name.</p>
+				<div class="buttons">
+					<button type="submit">Save</button>
+					<button type="button" id="bf_cancel" class="secondary">Cancel</button>
+				</div>
+			</form>
+		</section>
+
+		<!-- Settings -->
+		<section id="page-settings" class="page">
+			<h1>Settings</h1>
+			<p class="muted">Changes are saved to the settings file and take effect immediately.</p>
+
+			<form id="defaultsForm" class="card" autocomplete="off">
+				<h2>Global defaults</h2>
+				<p class="muted small">Template for newly created buckets.  Changing these does not alter existing buckets.</p>
+				<div class="grid">
+					<label>Default TTL (seconds) <input type="number" id="gd_defaultTtlSeconds" min="60" step="1" required></label>
+					<label>Maximum TTL (seconds) <input type="number" id="gd_maxTtlSeconds" min="60" step="1" required></label>
+					<label>Maximum item size (bytes) <input type="number" id="gd_maxItemSizeBytes" min="1" step="1" required></label>
+					<label>Maximum item count <input type="number" id="gd_maxItemCount" min="1" step="1" required></label>
+					<label>Maximum total bytes <input type="number" id="gd_maxTotalBytes" min="1" step="1" required></label>
+				</div>
+				<div class="buttons"><button type="submit">Save global defaults</button></div>
+			</form>
+
+			<form id="rateForm" class="card" autocomplete="off">
+				<h2>Rate limits</h2>
+				<p class="muted small">Per client (IPv4 address or IPv6 /64).  Each client has a bucket of tokens that starts full and refills continuously.</p>
+				<div class="tablewrap">
+					<table>
+						<thead><tr><th>Limiter</th><th>Capacity (tokens)</th><th>Refill (tokens per hour)</th><th>Consumed by</th></tr></thead>
+						<tbody>
+							<tr><td>Writes</td><td><input type="number" id="rl_writes_capacity" min="1" step="any" required></td><td><input type="number" id="rl_writes_refill" min="0.001" step="any" required></td><td>put, del (1 each)</td></tr>
+							<tr><td>Reads</td><td><input type="number" id="rl_reads_capacity" min="1" step="any" required></td><td><input type="number" id="rl_reads_refill" min="0.001" step="any" required></td><td>get, info (1 each)</td></tr>
+							<tr><td>Bytes</td><td><input type="number" id="rl_bytes_capacity" min="1" step="any" required></td><td><input type="number" id="rl_bytes_refill" min="0.001" step="any" required></td><td>put (1 per byte stored)</td></tr>
+						</tbody>
+					</table>
+				</div>
+				<div class="grid">
+					<label>Maximum tracked clients per limiter <input type="number" id="rl_maxTrackedClients" min="1000" step="1" required></label>
+				</div>
+				<p class="warning small">Applying a change replaces the rate limiters: every client's buckets are reset to full.</p>
+				<p class="muted small">The Bytes capacity should be at least as large as the largest bucket's maximum item size, or items of that size can never be stored.</p>
+				<div class="buttons"><button type="submit">Apply rate limits</button></div>
+			</form>
+
+			<form id="keyForm" class="card" autocomplete="off">
+				<h2>Key format</h2>
+				<label class="inline"><input type="radio" name="keyFormat" value="strict" id="kf_strict"> Strict (default): exactly 32 base32 characters, <code>^[a-z2-7]{32}$</code> (case-insensitive)</label>
+				<label class="inline"><input type="radio" name="keyFormat" value="permissive" id="kf_permissive"> Permissive: also accept <code>^[A-Za-z0-9_.-]{20,128}$</code> (case-sensitive)</label>
+				<p class="muted small">Strict keys carry 160 bits and make low-entropy keys like "settings" or "test" impossible.  Permissive mode lets clients choose weaker keys.</p>
+				<div class="buttons"><button type="submit">Save key format</button></div>
+			</form>
+
+			<form id="maintForm" class="card" autocomplete="off">
+				<h2>Maintenance</h2>
+				<div class="grid">
+					<label>Expiry sweep interval (seconds) <input type="number" id="mt_expirySweepIntervalSeconds" min="5" max="3600" step="1" required></label>
+					<label>Orphan sweep interval (seconds) <input type="number" id="mt_orphanSweepIntervalSeconds" min="60" max="86400" step="1" required></label>
+					<label>Orphan minimum age (seconds) <input type="number" id="mt_orphanMinAgeSeconds" min="60" max="86400" step="1" required></label>
+					<label>Minimum free disk space (bytes) <input type="number" id="mt_minFreeDiskBytes" min="0" step="1" required></label>
+				</div>
+				<p class="muted small">The database is checkpointed after each expiry sweep.  Expired items are never served, whether or not they have been swept.</p>
+				<div class="buttons">
+					<button type="submit">Save maintenance settings</button>
+					<button type="button" id="btnExpirySweep" class="secondary">Run expiry sweep now</button>
+					<button type="button" id="btnOrphanSweep" class="secondary">Run orphan sweep now</button>
+				</div>
+			</form>
+
+			<form id="generalForm" class="card" autocomplete="off">
+				<h2>Public API and landing page</h2>
+				<div class="grid">
+					<label>Public API IP address <input type="text" id="gn_publicIpAddress" placeholder="127.0.0.1"></label>
+					<label>Public API port (-1 to disable) <input type="number" id="gn_publicHttpPort" min="-1" max="65535" step="1" required></label>
+					<label>Operator name <input type="text" id="gn_operatorName" maxlength="200"></label>
+					<label>Abuse contact (email or URL) <input type="text" id="gn_abuseContact" maxlength="200"></label>
+				</div>
+				<p class="muted small">The public API should listen on loopback and be exposed only through a Cloudflare Tunnel.  The Admin Console binding (<span id="adminBinding"></span>) can only be changed in the settings file.</p>
+				<div class="buttons"><button type="submit">Save</button></div>
+			</form>
+		</section>
+
+		<!-- Danger Zone -->
+		<section id="page-danger" class="page">
+			<h1>Danger Zone</h1>
+
+			<form id="takedownForm" class="card" autocomplete="off">
+				<h2>Delete one item (takedown)</h2>
+				<p class="muted small">Items can not be listed or searched, so a takedown request must supply the exact bucket and key.  This reports only whether an item was deleted.</p>
+				<div class="grid">
+					<label>Bucket (empty for the default bucket) <input type="text" id="td_bucket" maxlength="32"></label>
+					<label class="wide">Key <input type="text" id="td_key" maxlength="128" required></label>
+				</div>
+				<div class="buttons"><button type="submit" class="danger">Delete item</button></div>
+			</form>
+
+			<form id="flushBucketForm" class="card" autocomplete="off">
+				<h2>Flush a bucket</h2>
+				<p class="muted small">Deletes every item in the bucket.  The bucket itself remains.</p>
+				<div class="grid">
+					<label>Bucket <select id="fb_bucket"></select></label>
+				</div>
+				<div class="buttons"><button type="submit" class="danger">Flush bucket</button></div>
+			</form>
+
+			<form id="flushAllForm" class="card" autocomplete="off">
+				<h2>Flush everything</h2>
+				<p class="muted small">Deletes every item in every bucket.  Type <code>DELETE</code> to confirm.</p>
+				<div class="grid">
+					<label>Confirmation <input type="text" id="fa_confirm"></label>
+				</div>
+				<div class="buttons"><button type="submit" class="danger">Flush everything</button></div>
+			</form>
+
+			<form id="rebuildForm" class="card" autocomplete="off">
+				<h2>Rebuild the database</h2>
+				<p class="muted small">Rewrites the metadata database file to reclaim unused space.  All storage operations wait until it is finished.</p>
+				<div class="buttons"><button type="submit" class="danger">Rebuild database</button></div>
+			</form>
+		</section>
+	</main>
+</body>
+</html>

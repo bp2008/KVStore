@@ -32,7 +32,16 @@
 		<None Remove="ServiceUI\**" />
 	</ItemGroup>
 
+	<!-- Files embedded in the assembly: the EFF short word list (used by /v1/phrase) and the Admin Console user interface. -->
 	<ItemGroup>
+		<None Remove="Resources\eff_short_wordlist_1.txt" />
+		<EmbeddedResource Include="Resources\eff_short_wordlist_1.txt" LogicalName="Resources.eff_short_wordlist_1.txt" />
+		<None Remove="AdminUI\**" />
+		<EmbeddedResource Include="AdminUI\**" LogicalName="AdminUI.%(Filename)%(Extension)" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="LiteDB" Version="5.0.21" />
 		<PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
 	</ItemGroup>
 

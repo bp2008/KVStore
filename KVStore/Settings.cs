@@ -39,6 +39,93 @@ namespace KVStore
 		/// </summary>
 		public string adminPass = null;
 
+		/// <summary>
+		/// Default TCP port for the public API.
+		/// </summary>
+		public const int DefaultPublicPort = 8080;
+		/// <summary>
+		/// <para>IP address which the public API listens on.  If null or empty, the public API listens on all interfaces.</para>
+		/// <para>The default is loopback, because the public API is meant to be exposed to the internet only through a Cloudflare Tunnel (cloudflared) running on the same machine.</para>
+		/// </summary>
+		public string publicIpAddress = "127.0.0.1";
+		/// <summary>
+		/// [1-65535] TCP port for the public API's HTTP listener, or -1 to disable the public API.  TLS is terminated by Cloudflare, so the public API does not offer HTTPS itself.
+		/// </summary>
+		public int publicHttpPort = DefaultPublicPort;
+		/// <summary>
+		/// An email address or URL where abuse reports and takedown requests can be sent.  Shown on the public landing page.
+		/// </summary>
+		public string abuseContact = "";
+		/// <summary>
+		/// Name of the operator of this service.  Shown on the public landing page and in the Terms of Service.
+		/// </summary>
+		public string operatorName = "";
+
+		/// <summary>
+		/// Name of the default bucket, which is used when a request does not name a bucket.  The default bucket always exists and can not be deleted or disabled.
+		/// </summary>
+		public string defaultBucketName = "default";
+		/// <summary>
+		/// The template applied to newly created buckets.  Changing these values does not alter existing buckets.
+		/// </summary>
+		public BucketConfig bucketDefaults = new BucketConfig();
+		/// <summary>
+		/// All configured buckets, including the default bucket.  Buckets are created only by the administrator; the public API can never create one.
+		/// </summary>
+		public List<BucketConfig> buckets = new List<BucketConfig>();
+		/// <summary>
+		/// <para>If false (default), keys must be exactly 32 base32 characters (<c>^[a-z2-7]{32}$</c>, case-insensitive, normalized to lower case).</para>
+		/// <para>If true, keys matching <c>^[A-Za-z0-9_.-]{20,128}$</c> are also accepted.  Such keys are case-sensitive, except that a key which satisfies the strict format is always normalized to lower case.</para>
+		/// </summary>
+		public bool permissiveKeys = false;
+		/// <summary>
+		/// Per-client rate limits for the public API.
+		/// </summary>
+		public RateLimitSettings rateLimits = new RateLimitSettings();
+		/// <summary>
+		/// Settings for the background maintenance tasks.
+		/// </summary>
+		public MaintenanceSettings maintenance = new MaintenanceSettings();
+
+		/// <summary>
+		/// A lookup table of <see cref="buckets"/> keyed on bucket name.  Built lazily.  Settings objects are not modified after they are activated, so the table remains valid for the lifetime of this instance.
+		/// </summary>
+		private Dictionary<string, BucketConfig> bucketLookup = null;
+		/// <summary>
+		/// Returns the bucket with the given (normalized) name, or null if no such bucket is configured.
+		/// </summary>
+		/// <param name="normalizedName">Bucket name that has already been normalized to lower case.</param>
+		/// <returns></returns>
+		public BucketConfig GetBucket(string normalizedName)
+		{
+			Dictionary<string, BucketConfig> lookup = bucketLookup;
+			if (lookup == null)
+			{
+				lookup = new Dictionary<string, BucketConfig>();
+				foreach (BucketConfig b in buckets)
+					if (b?.name != null)
+						lookup[b.name] = b;
+				bucketLookup = lookup;
+			}
+			lookup.TryGetValue(normalizedName, out BucketConfig bucket);
+			return bucket;
+		}
+		/// <summary>
+		/// Returns the default bucket.
+		/// </summary>
+		/// <returns></returns>
+		public BucketConfig GetDefaultBucket()
+		{
+			return GetBucket(defaultBucketName);
+		}
+		/// <summary>
+		/// Discards the lookup table used by <see cref="GetBucket"/>.  Call after modifying <see cref="buckets"/> on a settings object that has not been activated yet.
+		/// </summary>
+		public void InvalidateBucketLookup()
+		{
+			bucketLookup = null;
+		}
+
 		protected override SerializableObjectJson DeserializeFromJson(string str)
 		{
 			return Newtonsoft.Json.JsonConvert.DeserializeObject<Settings>(str);
@@ -119,6 +206,14 @@ namespace KVStore
 		public bool adminHttpsPortValid()
 		{
 			return adminHttpsPort >= 1 && adminHttpsPort <= 65535;
+		}
+		/// <summary>
+		/// Returns true if the public http port is between 1 and 65535.
+		/// </summary>
+		/// <returns></returns>
+		public bool publicHttpPortValid()
+		{
+			return publicHttpPort >= 1 && publicHttpPort <= 65535;
 		}
 	}
 }

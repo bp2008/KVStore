@@ -48,31 +48,75 @@ namespace KVStore
 
 		public override async Task handleRequest(HttpProcessor p, string method, CancellationToken cancellationToken = default)
 		{
+			await HandleRequestInternal(p, method, cancellationToken).ConfigureAwait(false);
+			if (!p.Response.ResponseHeaderWritten)
+				AddSecurityHeaders(p);
+		}
+		private async Task HandleRequestInternal(HttpProcessor p, string method, CancellationToken cancellationToken)
+		{
 			Settings settings = KVStoreService.MakeLocalSettingsReference();
+			KvEngine engine = KVStoreService.Engine;
+			if (engine == null)
+			{
+				p.Response.Simple("503 Service Unavailable", "The service is starting.");
+				return;
+			}
+
+			// Failed authentication attempts are rate limited per client address.  The address is used only as an in-memory key and is never logged.
+			string clientKey = ClientIp.GetRateLimitKey(p.RemoteIPAddress);
+			int lockoutSeconds = engine.AdminAuthLimiter.GetLockoutSeconds(clientKey);
+			if (lockoutSeconds > 0)
+			{
+				p.Response.Simple("429 Too Many Requests", "Too many failed login attempts.  Try again in " + lockoutSeconds + " seconds.");
+				p.Response.Headers.Set("Retry-After", lockoutSeconds.ToString());
+				return;
+			}
 
 			// HTTP Digest Authentication
 			NetworkCredential[] credentials = new NetworkCredential[] { new NetworkCredential(settings.adminUser, settings.adminPass) };
 			if (p.ValidateDigestAuth(AuthRealm, credentials) == null)
 			{
+				if (!string.IsNullOrEmpty(p.Request.Headers.Get("Authorization")))
+				{
+					engine.AdminAuthLimiter.RecordFailure(clientKey);
+					engine.Stats.Add(OpCounter.AdminAuthFailures);
+				}
 				p.Response.Simple("401 Unauthorized");
 				p.Response.Headers.Set("WWW-Authenticate", p.GetDigestAuthWWWAuthenticateHeaderValue(AuthRealm));
 				return;
 			}
+			engine.AdminAuthLimiter.RecordSuccess(clientKey);
 
 			if (await mvcAdminConsole.ProcessRequestAsync(p, cancellationToken: cancellationToken).ConfigureAwait(false))
 				return;
 
-			if (p.Request.Page.IEquals(""))
+			if (method == HttpMethods.GET || method == HttpMethods.HEAD)
 			{
-				// Placeholder until the Admin Console user interface is built.
-				p.Response.FullResponseUTF8("<!DOCTYPE html><html><head><title>KVStore Admin Console</title></head><body>"
-					+ "<h1>KVStore Admin Console</h1>"
-					+ "<p>KVStore " + Globals.AssemblyVersion + " is running.  The Admin Console user interface has not been built yet.</p>"
-					+ "</body></html>", "text/html; charset=utf-8");
-				return;
+				string page = p.Request.Page;
+				if (page == "")
+					page = "index.html";
+				if (AdminUiFiles.TryGet(page, out byte[] body, out string contentType))
+				{
+					p.Response.FullResponseBytes(body, contentType);
+					return;
+				}
 			}
 
 			p.Response.Simple("404 Not Found");
+		}
+		/// <summary>
+		/// Adds headers that restrict what the browser allows the Admin Console to do.
+		/// </summary>
+		private static void AddSecurityHeaders(HttpProcessor p)
+		{
+			HttpHeaderCollection h = p.Response.Headers;
+			if (h.Get("Cache-Control") == null)
+				h.Set("Cache-Control", "no-store");
+			h.Set("X-Content-Type-Options", "nosniff");
+			h.Set("X-Frame-Options", "DENY");
+			h.Set("Referrer-Policy", "no-referrer");
+			h.Set("X-Robots-Tag", "noindex, nofollow");
+			h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
 		}
 
 		/// <inheritdoc/>

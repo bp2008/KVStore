@@ -44,6 +44,14 @@ namespace KVStore
 			};
 #endif
 			AppInit.WindowsService<KVStoreService>(options);
+#if LINUX
+			// AppInit handled the "install" / "uninstall" arguments (if present).  The systemd sandboxing directives are maintained in a drop-in file alongside BPUtil's generated unit file.
+			string[] args = Environment.GetCommandLineArgs();
+			if (args.Length > 1 && args[1] == "install")
+				LinuxSystemdHardening.Apply(serviceName);
+			else if (args.Length > 1 && args[1] == "uninstall")
+				LinuxSystemdHardening.Remove(serviceName);
+#endif
 			return 0;
 		}
 
@@ -67,10 +75,12 @@ namespace KVStore
 				else if (input == "install")
 				{
 					AppInit.InstallLinuxSystemdService(serviceName, new WindowsServiceInitOptions() { LinuxOnInstall = runLinuxOnInstallCallback });
+					LinuxSystemdHardening.Apply(serviceName);
 				}
 				else if (input == "uninstall")
 				{
 					AppInit.UninstallLinuxSystemdService(serviceName);
+					LinuxSystemdHardening.Remove(serviceName);
 				}
 				else if (input == "status")
 				{
@@ -100,6 +110,18 @@ namespace KVStore
 				{
 					AdminCommandLineInterfaceAPICall("SaveConfig");
 				}
+				else if (input == "takedown")
+				{
+					c.Line("Deletes one stored item, e.g. in response to an abuse report.  Items can not be listed, so the exact bucket and key are required.");
+					c.Write("Bucket (leave empty for the default bucket): ");
+					string bucket = Console.ReadLine()?.Trim();
+					c.Write("Key: ");
+					string key = Console.ReadLine()?.Trim();
+					if (string.IsNullOrEmpty(key))
+						c.RedLine("No key was entered.");
+					else
+						AdminCommandLineInterfaceAPICall("DeleteItem", new { bucket, key });
+				}
 				else
 				{
 					c.RedLine("Unrecognized command");
@@ -109,7 +131,7 @@ namespace KVStore
 			}
 		}
 		private static WebRequestUtility wru = new WebRequestUtility("KVStore Command Line Interface", 4000) { AcceptAnyCertificate = true };
-		private static void AdminCommandLineInterfaceAPICall(string methodName)
+		private static void AdminCommandLineInterfaceAPICall(string methodName, object requestBody = null)
 		{
 			try
 			{
@@ -118,7 +140,8 @@ namespace KVStore
 				builder.Path = "/CommandLineInterface/" + methodName;
 				if (!string.IsNullOrWhiteSpace(adminInfo.user) && wru.BasicAuthCredentials == null)
 					wru.BasicAuthCredentials = new NetworkCredential(adminInfo.user, adminInfo.pass);
-				BpWebResponse response = wru.POST(builder.Uri.ToString(), new byte[0], "application/json", new string[] { "X-KVStore-CSRF-Protection", "1" });
+				byte[] body = requestBody == null ? new byte[0] : ByteUtil.Utf8NoBOM.GetBytes(JsonConvert.SerializeObject(requestBody));
+				BpWebResponse response = wru.POST(builder.Uri.ToString(), body, "application/json", new string[] { "X-KVStore-CSRF-Protection", "1" });
 				if (response.StatusCode == 0)
 					c.RedLine("Failed to get a response from the service. Is it running? Tried " + builder.Uri.ToString() + " and got " + (response.ex == null ? "No Response" : response.ex.ToHierarchicalString()));
 				else if (response.StatusCode != 200)
@@ -156,6 +179,7 @@ namespace KVStore
 			ConsoleAppHelper.WriteUsageCommand("readconfig", "Read current configuration from the running service and display it here.");
 			ConsoleAppHelper.WriteUsageCommand("loadconfig", "Instruct the running service to validate and reload the Settings.json file.");
 			ConsoleAppHelper.WriteUsageCommand("saveconfig", "Instruct the running service to save its current settings to the Settings.json file.");
+			ConsoleAppHelper.WriteUsageCommand("takedown", "Delete one stored item by bucket and key (for abuse reports).");
 			ConsoleAppHelper.WriteUsageCommand("exit", "Close this command line interface.");
 			c.WriteLine();
 		}

@@ -50,6 +50,21 @@ namespace KVStore.Controllers
 				return ApiError(ex.FlattenMessages());
 			}
 		}
+		/// <summary>
+		/// Deletes one item identified by bucket and key, for takedown requests.
+		/// </summary>
+		public async Task<ActionResult> DeleteItem()
+		{
+			try
+			{
+				DeleteItemRequest request = await ParseRequest<DeleteItemRequest>(CancellationToken).ConfigureAwait(false);
+				return Json(new CLIResponse(Operations.DeleteItemInternal(request)));
+			}
+			catch (Exception ex)
+			{
+				return ApiError(ex.FlattenMessages());
+			}
+		}
 	}
 	public class CLIResponse : ApiResponseBase
 	{
