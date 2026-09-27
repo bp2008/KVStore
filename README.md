@@ -118,6 +118,8 @@ await kv.putEncrypted(phrase, JSON.stringify(settings)); // device A
 const json = await kv.getEncryptedText(phrase);        // device B
 ```
 
+For pages served over plain http (where browsers withhold the WebCrypto API that the reference client needs) or old browsers down to Internet Explorer 9, use [`Client/kvstore-client-legacy.js`](Client/kvstore-client-legacy.js) instead.  It implements the same convention in dependency-free ES5 with callbacks, so either client can read what the other stores, but its pure-JavaScript key derivation is much slower, and in IE8/9 cross-origin requests go through `XDomainRequest`, which hides server error details and requires the page and the API to use the same scheme.
+
 Encryption protects stored data from anyone with access to the server's disk who lacks the phrase.  It adds no resistance to guessing the phrase: brute-force resistance comes from the phrase length and the rate limits.  Six words is the recommended minimum.
 
 ## Admin Console
