@@ -30,6 +30,12 @@ namespace KVStore
 		{
 			WindowsServiceInitOptions options = new WindowsServiceInitOptions();
 #if LINUX
+			if (!Environment.IsPrivilegedProcess)
+			{
+				// The data directory and systemd unit files are root-owned, so every mode (service, CLI, install) needs root.
+				c.RedLine("KVStore must be run as root. Try: sudo /usr/bin/dotnet \"" + Globals.EntryAssemblyLocation + "\"");
+				return 1;
+			}
 			options.ServiceName = serviceName = "kvstore";
 			options.LinuxCommandLineInterface = runCommandLineInterface;
 			options.LinuxOnInstall = runLinuxOnInstallCallback;

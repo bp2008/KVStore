@@ -95,7 +95,7 @@ namespace KVStore
 				string page = p.Request.Page;
 				if (page == "")
 					page = "index.html";
-				if (AdminUiFiles.TryGet(page, out byte[] body, out string contentType))
+				if (EmbeddedFiles.AdminUI.TryGet(page, out byte[] body, out string contentType))
 				{
 					p.Response.FullResponseBytes(body, contentType);
 					return;

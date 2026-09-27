@@ -26,7 +26,6 @@ namespace KVStore.Controllers
 					success = true,
 					publicIpAddress = s.publicIpAddress,
 					publicHttpPort = s.publicHttpPort,
-					abuseContact = s.abuseContact,
 					operatorName = s.operatorName,
 					adminIpAddress = s.adminIpAddress,
 					adminHttpPort = s.adminHttpPort,
@@ -248,7 +247,6 @@ namespace KVStore.Controllers
 				Settings s = KVStoreService.CloneSettingsObjectSlow();
 				s.publicIpAddress = request.publicIpAddress;
 				s.publicHttpPort = request.publicHttpPort;
-				s.abuseContact = request.abuseContact;
 				s.operatorName = request.operatorName;
 				await KVStoreService.SaveNewSettings(s, CancellationToken).ConfigureAwait(false);
 				return Json(new { success = true, message = "General settings were saved." });
@@ -282,7 +280,6 @@ namespace KVStore.Controllers
 	{
 		public string publicIpAddress;
 		public int publicHttpPort;
-		public string abuseContact;
 		public string operatorName;
 	}
 }

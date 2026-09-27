@@ -8,16 +8,30 @@ using System.Text;
 namespace KVStore
 {
 	/// <summary>
-	/// Serves the Admin Console's static files, which are embedded in the assembly (see the "AdminUI" folder).
+	/// A set of static files which are embedded in the assembly.
 	/// </summary>
-	public static class AdminUiFiles
+	public class EmbeddedFiles
 	{
-		private const string resourcePrefix = "AdminUI.";
-		private static readonly Lazy<Dictionary<string, byte[]>> files = new Lazy<Dictionary<string, byte[]>>(Load);
-		private static Dictionary<string, byte[]> Load()
+		/// <summary>
+		/// The Admin Console's files (see the "AdminUI" folder).
+		/// </summary>
+		public static readonly EmbeddedFiles AdminUI = new EmbeddedFiles("AdminUI.");
+		/// <summary>
+		/// The public web pages' files (see the "PublicSite" folder).
+		/// </summary>
+		public static readonly EmbeddedFiles PublicSite = new EmbeddedFiles("PublicSite.");
+
+		private readonly string resourcePrefix;
+		private readonly Lazy<Dictionary<string, byte[]>> files;
+		private EmbeddedFiles(string resourcePrefix)
+		{
+			this.resourcePrefix = resourcePrefix;
+			files = new Lazy<Dictionary<string, byte[]>>(Load);
+		}
+		private Dictionary<string, byte[]> Load()
 		{
 			Dictionary<string, byte[]> result = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-			Assembly assembly = typeof(AdminUiFiles).Assembly;
+			Assembly assembly = typeof(EmbeddedFiles).Assembly;
 			foreach (string name in assembly.GetManifestResourceNames())
 			{
 				if (!name.StartsWith(resourcePrefix, StringComparison.Ordinal))
@@ -38,7 +52,7 @@ namespace KVStore
 		/// <param name="body">(Output) File contents.</param>
 		/// <param name="contentType">(Output) Content-Type header value.</param>
 		/// <returns></returns>
-		public static bool TryGet(string fileName, out byte[] body, out string contentType)
+		public bool TryGet(string fileName, out byte[] body, out string contentType)
 		{
 			contentType = null;
 			if (!files.Value.TryGetValue(fileName, out body))
@@ -52,6 +66,17 @@ namespace KVStore
 				default: contentType = "application/octet-stream"; break;
 			}
 			return true;
+		}
+		/// <summary>
+		/// Gets the named file as UTF-8 text.  Throws if there is no such file.
+		/// </summary>
+		/// <param name="fileName">File name, e.g. "index.html".</param>
+		/// <returns></returns>
+		public string GetText(string fileName)
+		{
+			if (!files.Value.TryGetValue(fileName, out byte[] body))
+				throw new FileNotFoundException("Embedded file \"" + resourcePrefix + fileName + "\" was not found.");
+			return Encoding.UTF8.GetString(body);
 		}
 	}
 }

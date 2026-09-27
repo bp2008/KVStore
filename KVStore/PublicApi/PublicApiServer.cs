@@ -5,6 +5,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Text;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -16,7 +17,7 @@ namespace KVStore
 {
 	/// <summary>
 	/// <para>The public API web server.  It listens on its own port (loopback by default) and is exposed to the internet only through a Cloudflare Tunnel.</para>
-	/// <para>All key/value operations are POST requests with JSON bodies and JSON responses under "/v1/".  The only GET endpoints are "/v1/health", the landing page, and robots.txt.</para>
+	/// <para>All key/value operations are POST requests under "/v1/".  Most have JSON bodies and JSON responses.  "putraw" carries the value itself as the request body, with the other fields as URL parameters; "getraw" returns the value itself as the response body, with its metadata in "KV-" headers.  The only GET endpoints are "/v1/health" and the public web pages (the landing page, API tester, takedown form, and robots.txt).</para>
 	/// <para>Client IP addresses are learned from the "CF-Connecting-IP" header, which is trusted only from loopback (the local cloudflared process).  They are used only as keys for the in-memory rate limiters and are never logged.</para>
 	/// </summary>
 	public class PublicApiServer : HttpServerAsync
@@ -37,7 +38,16 @@ namespace KVStore
 		/// Allowance for the JSON surrounding a value in a "put" body, in bytes.
 		/// </summary>
 		public const long JsonOverheadAllowance = 4096;
+		/// <summary>
+		/// "getraw" response header: expiration time in Unix seconds.
+		/// </summary>
+		public const string ExpiresHeader = "KV-Expires";
+		/// <summary>
+		/// "getraw" response header: size of the value in bytes.
+		/// </summary>
+		public const string SizeHeader = "KV-Size";
 		private const string jsonContentType = "application/json; charset=utf-8";
+		private const string rawContentType = "application/octet-stream";
 		private readonly KvEngine engine;
 
 		/// <summary>
@@ -116,11 +126,12 @@ namespace KVStore
 			public RateLimiterSet rateLimits;
 			public string clientKey;
 			public JsonRequestReader reader;
+			public RawBodyReader rawReader;
 			public CancellationToken cancellationToken;
 			/// <summary>
 			/// True if the request body was read to its end (or there was none), so the connection can be reused.
 			/// </summary>
-			public bool BodyFullyRead => p.Request.RequestBodyStream == null || (reader != null && reader.ReachedEndOfStream);
+			public bool BodyFullyRead => p.Request.RequestBodyStream == null || (reader != null && reader.ReachedEndOfStream) || (rawReader != null && rawReader.ReachedEndOfStream);
 		}
 
 		/// <inheritdoc/>
@@ -162,6 +173,8 @@ namespace KVStore
 						engine.Stats.Add(OpCounter.BytesIn, c.reader.BytesRead);
 						c.reader.Dispose();
 					}
+					if (c.rawReader != null)
+						engine.Stats.Add(OpCounter.BytesIn, c.rawReader.BytesRead);
 				}
 			}
 			else
@@ -191,6 +204,8 @@ namespace KVStore
 			{
 				case "put": handler = HandlePut; break;
 				case "get": handler = HandleGet; break;
+				case "putraw": handler = HandlePutRaw; break;
+				case "getraw": handler = HandleGetRaw; break;
 				case "del": handler = HandleDel; break;
 				case "info": handler = HandleInfo; break;
 				case "buckets": handler = HandleBuckets; break;
@@ -283,16 +298,59 @@ namespace KVStore
 			{
 				sink.Dispose();
 				if (!committed)
-				{
-					try
-					{
-						File.Delete(tempPath);
-					}
-					catch (Exception ex)
-					{
-						KVStoreService.ReportError(ex, "Unable to delete temporary file \"" + tempPath + "\".  The orphan sweep will delete it later.");
-					}
-				}
+					DeleteTempFile(tempPath);
+			}
+		}
+		/// <summary>
+		/// POST /v1/putraw?key=&lt;key&gt;&amp;bucket=default&amp;ttl=3600 with the value as the request body.  "bucket" and "ttl" are optional.
+		/// </summary>
+		private async Task HandlePutRaw(ApiContext c)
+		{
+			engine.Stats.Add(OpCounter.PutRaws);
+			Settings s = c.settings;
+			// The other fields are URL parameters rather than headers, because custom headers would make browsers send a CORS preflight request first.
+			// Unlike "put", everything besides the value is known up front, so the request is validated, and the bucket's own size limit applies, before any of the body is read.
+			IDictionary<string, string> query = c.p.Request.RawQueryParams;
+			query.TryGetValue("bucket", out string bucketName);
+			BucketConfig bucket = ResolveBucketByName(s, bucketName);
+			if (!query.TryGetValue("key", out string key))
+				throw ApiException.BadRequest();
+			key = NormalizeKey(s, key);
+			query.TryGetValue("ttl", out string ttlParam);
+			double? ttl = ParseTtlParam(ttlParam);
+			long? contentLength = c.p.Request.ContentLength;
+			if (contentLength > bucket.maxItemSizeBytes)
+				throw ApiException.TooLarge();
+
+			Limit(c.rateLimits.Writes, c.clientKey, 1);
+			if (contentLength > 0)
+			{
+				// Refuse early, without reading the body, if the client lacks the byte allowance for a value of this size.
+				int retryAfter = c.rateLimits.Bytes.CheckAvailable(c.clientKey, Math.Min(contentLength.Value, c.rateLimits.Bytes.Capacity));
+				if (retryAfter > 0)
+					throw ApiException.RateLimited(retryAfter);
+			}
+
+			string tempPath = engine.Storage.CreateTempFilePath();
+			bool committed = false;
+			try
+			{
+				c.rawReader = new RawBodyReader(c.p.Request.RequestBodyStream, ReadTimeoutMs, c.cancellationToken);
+				await c.rawReader.CopyToFileAsync(tempPath, bucket.maxItemSizeBytes).ConfigureAwait(false);
+				long size = c.rawReader.BytesRead;
+				if (size > 0)
+					Limit(c.rateLimits.Bytes, c.clientKey, size);
+				int ttlApplied = bucket.ApplyTtl(ttl);
+				PutResult result = engine.Storage.CommitPut(bucket, key, tempPath, size, ttlApplied, s.maintenance.minFreeDiskBytes);
+				if (!result.Ok)
+					throw ApiException.StorageFull();
+				committed = true;
+				await SendJson(c, "200 OK", new { ok = true, expires = result.Expires, ttl = ttlApplied, size }).ConfigureAwait(false);
+			}
+			finally
+			{
+				if (!committed)
+					DeleteTempFile(tempPath);
 			}
 		}
 		/// <summary>
@@ -308,6 +366,21 @@ namespace KVStore
 				if (item == null)
 					throw ApiException.NotFound();
 				await SendValue(c, item).ConfigureAwait(false);
+			}
+		}
+		/// <summary>
+		/// POST /v1/getraw { "bucket": "default", "key": "&lt;key&gt;" }, answered with the value as the response body and the "KV-Expires" and "KV-Size" headers.
+		/// </summary>
+		private async Task HandleGetRaw(ApiContext c)
+		{
+			engine.Stats.Add(OpCounter.GetRaws);
+			Limit(c.rateLimits.Reads, c.clientKey, 1);
+			(BucketConfig bucket, string key) = await ReadBucketAndKey(c).ConfigureAwait(false);
+			using (ItemReader item = engine.Storage.OpenLive(bucket.name, key))
+			{
+				if (item == null)
+					throw ApiException.NotFound();
+				await SendRawValue(c, item).ConfigureAwait(false);
 			}
 		}
 		/// <summary>
@@ -412,14 +485,28 @@ namespace KVStore
 		/// <returns></returns>
 		private static BucketConfig ResolveBucket(Settings s, JsonScalar v)
 		{
+			if (v == null || v.Type == JsonScalarType.Null)
+				return ResolveBucketByName(s, null);
+			if (v.Type != JsonScalarType.String)
+				throw ApiException.InvalidBucket();
+			return ResolveBucketByName(s, v.StringValue);
+		}
+		/// <summary>
+		/// Returns the named bucket (or the default bucket if the name is null or empty).  Throws if the bucket is invalid, unknown, or disabled.  Buckets are never created by this method.
+		/// </summary>
+		/// <param name="s">Settings</param>
+		/// <param name="name">Bucket name as supplied by the client.</param>
+		/// <returns></returns>
+		private static BucketConfig ResolveBucketByName(Settings s, string name)
+		{
 			BucketConfig bucket;
-			if (v == null || v.Type == JsonScalarType.Null || (v.Type == JsonScalarType.String && v.StringValue == ""))
+			if (string.IsNullOrEmpty(name))
 				bucket = s.GetDefaultBucket();
 			else
 			{
-				if (v.Type != JsonScalarType.String || !KvNames.TryNormalizeBucketName(v.StringValue, out string name))
+				if (!KvNames.TryNormalizeBucketName(name, out string normalized))
 					throw ApiException.InvalidBucket();
-				bucket = s.GetBucket(name);
+				bucket = s.GetBucket(normalized);
 			}
 			if (bucket == null)
 				throw ApiException.UnknownBucket();
@@ -432,9 +519,43 @@ namespace KVStore
 		/// </summary>
 		private static string NormalizeKey(Settings s, JsonScalar v)
 		{
-			if (v.Type != JsonScalarType.String || !KvNames.TryNormalizeKey(v.StringValue, s.permissiveKeys, out string key))
+			if (v.Type != JsonScalarType.String)
+				throw ApiException.InvalidKey();
+			return NormalizeKey(s, v.StringValue);
+		}
+		/// <summary>
+		/// Validates and normalizes a key.
+		/// </summary>
+		private static string NormalizeKey(Settings s, string input)
+		{
+			if (!KvNames.TryNormalizeKey(input, s.permissiveKeys, out string key))
 				throw ApiException.InvalidKey();
 			return key;
+		}
+		/// <summary>
+		/// Parses the "ttl" URL parameter of "putraw".  Returns null if it is absent or empty.
+		/// </summary>
+		private static double? ParseTtlParam(string value)
+		{
+			if (string.IsNullOrWhiteSpace(value))
+				return null;
+			if (!double.TryParse(value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out double ttl) || double.IsNaN(ttl) || double.IsInfinity(ttl))
+				throw ApiException.BadRequest();
+			return ttl;
+		}
+		/// <summary>
+		/// Deletes a temporary file of an upload that was not committed.
+		/// </summary>
+		private static void DeleteTempFile(string tempPath)
+		{
+			try
+			{
+				File.Delete(tempPath);
+			}
+			catch (Exception ex)
+			{
+				KVStoreService.ReportError(ex, "Unable to delete temporary file \"" + tempPath + "\".  The orphan sweep will delete it later.");
+			}
 		}
 		/// <summary>
 		/// Adds the headers that every public API response carries.
@@ -446,7 +567,7 @@ namespace KVStore
 			h["Access-Control-Allow-Methods"] = "POST, OPTIONS";
 			h["Access-Control-Allow-Headers"] = "Content-Type";
 			h["Access-Control-Max-Age"] = "86400";
-			h["Access-Control-Expose-Headers"] = "Retry-After";
+			h["Access-Control-Expose-Headers"] = "Retry-After, " + ExpiresHeader + ", " + SizeHeader;
 			h["Cache-Control"] = "no-store";
 			h["X-Content-Type-Options"] = "nosniff";
 			h["X-Robots-Tag"] = "noindex, nofollow";
@@ -534,9 +655,43 @@ namespace KVStore
 				ArrayPool<byte>.Shared.Return(outBuf);
 			}
 		}
+		/// <summary>
+		/// Writes the "getraw" response, streaming the value from disk as the response body.
+		/// </summary>
+		private async Task SendRawValue(ApiContext c, ItemReader item)
+		{
+			const int chunk = 65536;
+			long size = item.Stream.Length;
+			HttpProcessor p = c.p;
+			p.Response.Set(rawContentType, null, "200 OK");
+			p.Response.ContentLength = size;
+			AddApiHeaders(p);
+			p.Response.Headers[ExpiresHeader] = item.Meta.Expires.ToString(CultureInfo.InvariantCulture);
+			p.Response.Headers[SizeHeader] = size.ToString(CultureInfo.InvariantCulture);
+			engine.Stats.Add(OpCounter.BytesOut, size);
+
+			byte[] buf = ArrayPool<byte>.Shared.Rent(chunk);
+			try
+			{
+				Stream rs = await p.Response.GetResponseStreamAsync(c.cancellationToken).ConfigureAwait(false);
+				long remaining = size;
+				while (remaining > 0)
+				{
+					int n = await item.Stream.ReadAsync(buf, 0, (int)Math.Min(chunk, remaining), c.cancellationToken).ConfigureAwait(false);
+					if (n <= 0)
+						throw new IOException("Value file ended unexpectedly.");
+					await rs.WriteAsync(buf, 0, n, c.cancellationToken).ConfigureAwait(false);
+					remaining -= n;
+				}
+			}
+			finally
+			{
+				ArrayPool<byte>.Shared.Return(buf);
+			}
+		}
 		#endregion
 
-		#region Landing page
+		#region Public web pages
 		private void HandleSiteRequest(HttpProcessor p, string method, string page)
 		{
 			if (method != HttpMethods.GET && method != HttpMethods.HEAD)
@@ -548,6 +703,8 @@ namespace KVStore
 				p.Response.FullResponseUTF8(LandingPage.GetHtml(engine.GetSettings()), "text/html; charset=utf-8");
 			else if (page.IEquals("robots.txt"))
 				p.Response.FullResponseUTF8("User-agent: *\nDisallow: /\n", "text/plain; charset=utf-8");
+			else if (TryGetSiteFile(page, out byte[] body, out string contentType))
+				p.Response.FullResponseBytes(body, contentType);
 			else
 				p.Response.Simple("404 Not Found");
 			HttpHeaderCollection h = p.Response.Headers;
@@ -556,7 +713,25 @@ namespace KVStore
 			h["X-Robots-Tag"] = "noindex, nofollow";
 			h["X-Frame-Options"] = "DENY";
 			h["Referrer-Policy"] = "no-referrer";
-			h["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'";
+			// The pages' scripts may only call this server's API.  Forms are submitted by script only, so a form must never navigate (which would put a key in the address bar and history).
+			h["Content-Security-Policy"] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+		}
+		/// <summary>
+		/// Gets a file of the public web pages (see the "PublicSite" folder).  Pages are requested without their ".html" extension, e.g. "/takedown".  "index.html" is the landing page template, which is only served (filled in) at "/".
+		/// </summary>
+		private static bool TryGetSiteFile(string page, out byte[] body, out string contentType)
+		{
+			string lower = page.ToLowerInvariant();
+			string fileName = null;
+			if (lower.EndsWith(".css") || lower.EndsWith(".js"))
+				fileName = page;
+			else if (lower != "index" && !lower.Contains('.'))
+				fileName = page + ".html";
+			if (fileName != null && EmbeddedFiles.PublicSite.TryGet(fileName, out body, out contentType))
+				return true;
+			body = null;
+			contentType = null;
+			return false;
 		}
 		#endregion
 	}

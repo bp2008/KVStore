@@ -62,21 +62,32 @@
 	 */
 	KVStoreClient.prototype._post = function (endpoint, body)
 	{
-		return fetch(this.baseUrl + "/v1/" + endpoint, {
+		return this._fetch(endpoint, JSON.stringify(body || {}), "text/plain;charset=UTF-8").then(KVStoreClient._readJson);
+	};
+	/**
+	 * POSTs to an API endpoint.  If contentType is null, no Content-Type header is sent (fetch sends none for a Uint8Array body), which also needs no preflight.
+	 */
+	KVStoreClient.prototype._fetch = function (endpointAndQuery, body, contentType)
+	{
+		return fetch(this.baseUrl + "/v1/" + endpointAndQuery, {
 			method: "POST",
-			headers: { "Content-Type": "text/plain;charset=UTF-8" },
-			body: JSON.stringify(body || {}),
+			headers: contentType ? { "Content-Type": contentType } : {},
+			body: body,
 			credentials: "omit",
 			cache: "no-store"
-		}).then(function (response)
+		});
+	};
+	/**
+	 * Reads a JSON response, resolving with it if "ok" is true, otherwise rejecting with a KVStoreError.
+	 */
+	KVStoreClient._readJson = function (response)
+	{
+		return response.json().catch(function () { return null; }).then(function (json)
 		{
-			return response.json().catch(function () { return null; }).then(function (json)
-			{
-				if (json && json.ok)
-					return json;
-				var retryAfter = parseInt(response.headers.get("Retry-After"), 10) || 0;
-				throw new KVStoreError(response.status, json && json.error ? json.error : "http_" + response.status, retryAfter);
-			});
+			if (json && json.ok)
+				return json;
+			var retryAfter = parseInt(response.headers.get("Retry-After"), 10) || 0;
+			throw new KVStoreError(response.status, json && json.error ? json.error : "http_" + response.status, retryAfter);
 		});
 	};
 	KVStoreClient.prototype._keyBody = function (key)
@@ -88,7 +99,7 @@
 	};
 
 	/**
-	 * Stores a value.  Overwrites any existing value with the same key.
+	 * Stores a value without encrypting it.  Overwrites any existing value with the same key.  Uses the "putraw" operation, which sends the bytes as the request body (no base64 overhead).
 	 * @param {string} key 32 base32 characters.
 	 * @param {Uint8Array} bytes The value.
 	 * @param {number} [ttl] Requested lifetime in seconds.  The server clamps it to the bucket's limits.
@@ -96,22 +107,25 @@
 	 */
 	KVStoreClient.prototype.putRaw = function (key, bytes, ttl)
 	{
-		var body = this._keyBody(key);
-		body.value = KVStoreClient.bytesToBase64(bytes);
+		var query = "key=" + encodeURIComponent(key);
+		if (this.bucket)
+			query += "&bucket=" + encodeURIComponent(this.bucket);
 		if (ttl)
-			body.ttl = ttl;
-		return this._post("put", body);
+			query += "&ttl=" + encodeURIComponent(ttl);
+		return this._fetch("putraw?" + query, bytes, null).then(KVStoreClient._readJson);
 	};
 	/**
-	 * Retrieves a value.  Resolves with null if the key does not exist (or has expired).
+	 * Retrieves a value stored with putRaw (or by any other client).  Resolves with null if the key does not exist (or has expired).  Uses the "getraw" operation, which returns the bytes as the response body.
 	 * @param {string} key
 	 * @returns {Promise<Uint8Array|null>}
 	 */
 	KVStoreClient.prototype.getRaw = function (key)
 	{
-		return this._post("get", this._keyBody(key)).then(function (r)
+		return this._fetch("getraw", JSON.stringify(this._keyBody(key)), "text/plain;charset=UTF-8").then(function (response)
 		{
-			return KVStoreClient.base64ToBytes(r.value);
+			if (response.status === 200)
+				return response.arrayBuffer().then(function (ab) { return new Uint8Array(ab); });
+			return KVStoreClient._readJson(response);
 		}).catch(function (e)
 		{
 			if (e instanceof KVStoreError && e.code === "not_found")

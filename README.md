@@ -55,12 +55,16 @@ The Windows build (`KVStore.exe`) opens a service manager window with Install/St
 
 ## Public API
 
-All endpoints are under `/v1/`.  Key/value operations are `POST` requests with a JSON body and a JSON response.  Browsers should send `Content-Type: text/plain;charset=UTF-8`, which is CORS-safelisted, so no preflight request is needed; the body is parsed as JSON regardless of the declared content type.  CORS allows any origin, without credentials.
+All endpoints are under `/v1/`.  Key/value operations are `POST` requests with a JSON body and a JSON response, except `putraw` and `getraw`, which carry the value as raw bytes.  Browsers should send `Content-Type: text/plain;charset=UTF-8`, which is CORS-safelisted, so no preflight request is needed; the body is parsed as JSON regardless of the declared content type.  CORS allows any origin, without credentials.
+
+The public landing page (`/`) documents every operation's fields in detail, and links to a browser-based API tester (`/api-tester`) and a self-service takedown form (`/takedown`).
 
 | Endpoint | Request body | Success response |
 |---|---|---|
 | `POST /v1/put` | `{ "bucket": "default", "key": "<key>", "value": "<base64>", "ttl": 3600 }` | `{ "ok": true, "expires": 1754332800, "ttl": 3600, "size": 4096 }` |
 | `POST /v1/get` | `{ "bucket": "default", "key": "<key>" }` | `{ "ok": true, "value": "<base64>", "expires": 1754332800, "size": 4096 }` |
+| `POST /v1/putraw?key=<key>&bucket=default&ttl=3600` | The value's raw bytes | Same as `put` |
+| `POST /v1/getraw` | `{ "bucket": "default", "key": "<key>" }` | The value's raw bytes (`application/octet-stream`), with `KV-Expires` and `KV-Size` headers |
 | `POST /v1/info` | `{ "bucket": "default", "key": "<key>" }` | `{ "ok": true, "exists": true, "expires": 1754332800, "size": 4096 }` |
 | `POST /v1/del` | `{ "bucket": "default", "key": "<key>" }` | `{ "ok": true, "deleted": true }` |
 | `POST /v1/buckets` | `{}` | `{ "ok": true, "defaultBucket": "default", "buckets": [ { "name": "default", "maxItemSizeBytes": 5242880, "defaultTtl": 3600, "maxTtl": 7200 } ] }` |
@@ -70,6 +74,7 @@ All endpoints are under `/v1/`.  Key/value operations are `POST` requests with a
 * **Keys** are 32 characters from the RFC 4648 base32 alphabet (`a-z`, `2-7`), case-insensitive.  An administrator can enable a permissive mode that also accepts `^[A-Za-z0-9_.-]{20,128}$` (case-sensitive).
 * **Buckets** are namespaces with their own limits, created only by the administrator.  `bucket` is optional; if omitted, the default bucket is used.  Bucket names are 1-32 base32 characters, case-insensitive.
 * **TTL** is optional.  It is clamped to the range [60 seconds, the bucket's maximum], and the response reports the TTL that was applied.  Reading an item never extends its lifetime.
+* `putraw` and `getraw` avoid base64's 33% overhead.  `putraw` takes `key`, `bucket`, and `ttl` as URL parameters rather than headers, because custom headers would require a CORS preflight request; browsers should send the body with no `Content-Type` (the default for a `Uint8Array`) or `text/plain`.  A failed `getraw` returns the usual JSON error, so check the status before treating the body as the value.
 * `put` overwrites unconditionally.  `info` lets a device poll for another device's upload without downloading it.
 * `phrase` returns random words from the [EFF short wordlist #1](https://www.eff.org/dice).  Nothing is recorded.  Generating phrases on the client is preferred.
 
@@ -77,19 +82,21 @@ Errors are reported as `{ "ok": false, "error": "<code>" }`:
 
 | HTTP | `error` | Cause |
 |---|---|---|
-| 400 | `bad_request` | Malformed JSON or missing field |
+| 400 | `bad_request` | Malformed JSON, or a missing field or parameter |
 | 400 | `invalid_key` | Key fails format validation |
 | 400 | `invalid_bucket` | Bucket name fails format validation |
 | 400 | `invalid_value` | Bad base64 |
 | 404 | `not_found` | Key absent or expired |
 | 404 | `unknown_bucket` | Bucket not configured |
+| 404 | `unknown_endpoint` | No such operation |
+| 405 | `method_not_allowed` | Wrong HTTP method |
 | 413 | `too_large` | Value exceeds the bucket's maximum item size |
 | 429 | `rate_limited` | Too many requests; see the `Retry-After` header |
 | 503 | `bucket_disabled` | Bucket disabled by the administrator |
 | 503 | `storage_full` | Bucket quota reached and eviction could not make room, or the disk is nearly full |
 | 500 | `internal_error` | Unexpected error; the response includes a `correlationId` that appears in the server's error log |
 
-Requests are rate-limited per client (IPv4 address, or IPv6 /64 prefix).  By default: 10 writes (`put`, `del`) refilled at 60/hour, 30 reads (`get`, `info`) refilled at 600/hour, and 10 MiB of stored data refilled at 10 MiB/day.
+Requests are rate-limited per client (IPv4 address, or IPv6 /64 prefix).  By default: 10 writes (`put`, `putraw`, `del`) refilled at 60/hour, 30 reads (`get`, `getraw`, `info`) refilled at 600/hour, and 10 MiB of stored data refilled at 10 MiB/day.
 
 ## Client-side encryption
 
@@ -136,7 +143,7 @@ Database damage is treated as a normal event rather than a crisis: every stored 
 
 1. Register a [DMCA designated agent](https://www.copyright.gov/dmca-directory/) with the U.S. Copyright Office.  Registration expires after three years.
 2. Register with NCMEC as an electronic service provider before you need to.  Providers must report apparent child sexual abuse material to NCMEC after obtaining actual knowledge of it (18 U.S.C. § 2258A), but are not required to monitor or scan content.
-3. Set `operatorName` and `abuseContact` in the admin console.  They are shown on the landing page (`/`) together with a Terms of Service template, which you should review.  Because items can't be listed, a takedown request must supply the exact bucket and key; delete it with the admin console's danger zone or the `takedown` command.
+3. Set `operatorName` in the admin console.  It is shown on the landing page (`/`) together with a Terms of Service template, which you should review.  No contact information is published: anyone who has an item's bucket and key can delete it immediately with the self-service takedown form (`/takedown`), which uses the public `del` operation.  If a takedown request reaches you another way, delete the item with the admin console's danger zone or the `takedown` command.
 
 ## Building
 

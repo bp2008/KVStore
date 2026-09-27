@@ -202,7 +202,7 @@
 
 		// Operation counters
 		var rows = [
-			["Requests", "Requests"], ["put", "Puts"], ["get", "Gets"], ["del", "Dels"], ["info", "Infos"], ["buckets", "BucketLists"], ["phrase", "Phrases"], ["health", "Healths"],
+			["Requests", "Requests"], ["put", "Puts"], ["get", "Gets"], ["putraw", "PutRaws"], ["getraw", "GetRaws"], ["del", "Dels"], ["info", "Infos"], ["buckets", "BucketLists"], ["phrase", "Phrases"], ["health", "Healths"],
 			["400 responses", "Status400"], ["404 responses", "Status404"], ["413 responses", "Status413"], ["429 responses", "Status429"], ["503 responses", "Status503"], ["Other 5xx responses", "Status5xx"],
 			["Bytes in", "BytesIn", true], ["Bytes out", "BytesOut", true],
 			["Expired items swept", "ExpiredSwept"], ["Quota evictions", "QuotaEvicted"], ["Orphan files reclaimed", "OrphanFilesReclaimed"], ["Orphan metadata removed", "OrphanMetadataRemoved"],
@@ -339,7 +339,6 @@
 		$("gn_publicIpAddress").value = config.publicIpAddress || "";
 		$("gn_publicHttpPort").value = config.publicHttpPort;
 		$("gn_operatorName").value = config.operatorName || "";
-		$("gn_abuseContact").value = config.abuseContact || "";
 		var admin = [];
 		if (config.adminHttpsPort > 0) admin.push("https port " + config.adminHttpsPort);
 		if (config.adminHttpPort > 0) admin.push("http port " + config.adminHttpPort);
@@ -409,8 +408,7 @@
 				return api("Config/SaveGeneral", {
 					publicIpAddress: $("gn_publicIpAddress").value.trim(),
 					publicHttpPort: num("gn_publicHttpPort"),
-					operatorName: $("gn_operatorName").value,
-					abuseContact: $("gn_abuseContact").value
+					operatorName: $("gn_operatorName").value
 				});
 			}, loadConfig);
 		});

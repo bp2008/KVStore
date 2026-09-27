@@ -318,7 +318,7 @@ namespace KVStore.Tests
 				Assert.AreEqual("rate_limited", limited.Error);
 				Assert.IsTrue(int.TryParse(limited.Headers["Retry-After"], out int retryAfter), limited.Headers["Retry-After"]);
 				Assert.IsTrue(retryAfter >= 1 && retryAfter <= 60, "60 per hour refill means a token every 60 seconds; Retry-After was " + retryAfter);
-				Assert.AreEqual("Retry-After", limited.Headers["Access-Control-Expose-Headers"]);
+				Assert.AreEqual("Retry-After, KV-Expires, KV-Size", limited.Headers["Access-Control-Expose-Headers"]);
 
 				// A different client is unaffected.
 				Assert.AreEqual(200, (await ts.Post("del", new { key = TestServer.NewKey() }, "203.0.113.50")).Status);
@@ -512,9 +512,27 @@ namespace KVStore.Tests
 				Assert.AreEqual(200, landing.Status);
 				Assert.AreEqual("noindex, nofollow", landing.Headers["X-Robots-Tag"]);
 				Assert.IsTrue(landing.Text.Contains("Terms of Service"));
-				ts.UpdateSettings(s => s.abuseContact = "abuse@example.com");
+				Assert.IsFalse(landing.Text.Contains("{{"), "Every placeholder in the landing page template is filled in");
+				Assert.IsFalse(landing.Text.Contains("mailto:"), "No contact information is published");
+				Assert.IsTrue(landing.Text.Contains("href=\"takedown\""));
+				Assert.IsTrue(landing.Text.Contains("href=\"api-tester\""));
+				Assert.IsTrue(landing.Text.Contains("5 MiB in the default bucket"), "Limits come from the settings");
+				ts.UpdateSettings(s => s.operatorName = "Example <Operator>");
 				landing = await ts.Send(new HttpRequestMessage(HttpMethod.Get, ""));
-				Assert.IsTrue(landing.Text.Contains("mailto:abuse@example.com"));
+				Assert.IsTrue(landing.Text.Contains("offered by Example &lt;Operator&gt;."), "Settings are HTML-encoded");
+				Assert.IsTrue(landing.Headers["Content-Security-Policy"].Contains("script-src 'self'"));
+
+				// The other public pages and their files.
+				foreach (string path in new string[] { "api-tester", "takedown", "site.css", "site.js", "api-tester.js", "takedown.js" })
+				{
+					ApiResult r = await ts.Send(new HttpRequestMessage(HttpMethod.Get, path));
+					Assert.AreEqual(200, r.Status, path);
+					Assert.AreEqual("nosniff", r.Headers["X-Content-Type-Options"], path);
+					Assert.IsTrue(r.Headers.ContainsKey("Content-Security-Policy"), path);
+				}
+				Assert.IsTrue((await ts.Send(new HttpRequestMessage(HttpMethod.Get, "takedown"))).Text.Contains("takedown.js"));
+				// The landing page template is only served filled in, at "/".
+				Assert.AreEqual(404, (await ts.Send(new HttpRequestMessage(HttpMethod.Get, "index"))).Status);
 				ApiResult robots = await ts.Send(new HttpRequestMessage(HttpMethod.Get, "robots.txt"));
 				Assert.AreEqual(200, robots.Status);
 				Assert.IsTrue(robots.Text.Contains("Disallow: /"));
@@ -530,6 +548,186 @@ namespace KVStore.Tests
 				}
 				Assert.AreEqual(404, (await ts.Send(new HttpRequestMessage(HttpMethod.Get, "admin.js"))).Status);
 				Assert.AreEqual(404, (await ts.Send(new HttpRequestMessage(HttpMethod.Get, "index.html"))).Status);
+			}
+		}
+
+		/// <summary>
+		/// Sends a "putraw" request with the given body and URL parameters.  The body is sent with no Content-Type, as browsers send a Uint8Array.
+		/// </summary>
+		private static Task<ApiResult> PutRaw(TestServer ts, byte[] data, string query, bool chunked = false)
+		{
+			HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, "v1/putraw" + (query == null ? "" : "?" + query));
+			if (chunked)
+				req.Content = new StreamContent(new NonSeekableStream(data)); // Length unknown, so HttpClient uses chunked transfer encoding.
+			else
+				req.Content = new ByteArrayContent(data);
+			return ts.Send(req);
+		}
+		/// <summary>
+		/// Sends a "getraw" request and returns the status, the body bytes, and the response headers.
+		/// </summary>
+		private static async Task<(int status, byte[] body, Dictionary<string, string> headers)> GetRaw(TestServer ts, object body)
+		{
+			HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, "v1/getraw");
+			req.Content = new StringContent(Newtonsoft.Json.JsonConvert.SerializeObject(body));
+			using (HttpResponseMessage res = await ts.Client.SendAsync(req))
+			{
+				Dictionary<string, string> headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+				foreach (var h in res.Headers)
+					headers[h.Key] = string.Join(", ", h.Value);
+				foreach (var h in res.Content.Headers)
+					headers[h.Key] = string.Join(", ", h.Value);
+				return ((int)res.StatusCode, await res.Content.ReadAsByteArrayAsync(), headers);
+			}
+		}
+		private sealed class NonSeekableStream : MemoryStream
+		{
+			public NonSeekableStream(byte[] data) : base(data) { }
+			public override bool CanSeek => false;
+		}
+
+		[TestMethod]
+		public async Task TestPutRawGetRawRoundTrip()
+		{
+			using (TestServer ts = new TestServer(s =>
+			{
+				s.rateLimits.writes.capacity = 100;
+				s.rateLimits.reads.capacity = 100;
+				s.rateLimits.bytes.capacity = 100L * 1024 * 1024;
+			}))
+			{
+				byte[] data = RandomBytes(5 * 1024 * 1024);
+				string key = TestServer.NewKey();
+				ApiResult put = await PutRaw(ts, data, "key=" + key);
+				Assert.AreEqual(200, put.Status, put.ToString());
+				Assert.AreEqual(data.Length, (long)put.Json["size"]);
+				Assert.AreEqual(3600, (int)put.Json["ttl"]);
+
+				var get = await GetRaw(ts, new { key });
+				Assert.AreEqual(200, get.status);
+				CollectionAssert.AreEqual(data, get.body);
+				Assert.AreEqual("application/octet-stream", get.headers["Content-Type"]);
+				Assert.AreEqual(((long)put.Json["expires"]).ToString(), get.headers["KV-Expires"]);
+				Assert.AreEqual(data.Length.ToString(), get.headers["KV-Size"]);
+				Assert.AreEqual("*", get.headers["Access-Control-Allow-Origin"]);
+
+				// Raw and base64 operations share the same items.
+				ApiResult getB64 = await ts.Post("get", new { key });
+				CollectionAssert.AreEqual(data, Convert.FromBase64String((string)getB64.Json["value"]));
+				string key2 = TestServer.NewKey();
+				Assert.AreEqual(200, (await ts.Post("put", new { key = key2, value = "AQID" })).Status);
+				CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, (await GetRaw(ts, new { key = key2 })).body);
+
+				// Small and empty values, chunked uploads, and URL parameters (names are case-insensitive).
+				foreach (int len in new int[] { 0, 1, 2, 3, 100 })
+				{
+					foreach (bool chunked in new bool[] { false, true })
+					{
+						byte[] small = RandomBytes(len);
+						string k = TestServer.NewKey();
+						ApiResult p = await PutRaw(ts, small, "KEY=" + k.ToUpperInvariant() + "&bucket=Photos&ttl=999999", chunked);
+						Assert.AreEqual(200, p.Status, len + " " + chunked + " " + p);
+						Assert.AreEqual(7200, (int)p.Json["ttl"]);
+						Assert.AreEqual(len, (long)p.Json["size"]);
+						var g = await GetRaw(ts, new { bucket = "photos", key = k });
+						Assert.AreEqual(200, g.status);
+						CollectionAssert.AreEqual(small, g.body, len + " " + chunked);
+					}
+				}
+
+				// Errors are JSON.
+				var missing = await GetRaw(ts, new { key = TestServer.NewKey() });
+				Assert.AreEqual(404, missing.status);
+				Assert.IsTrue(missing.headers["Content-Type"].StartsWith("application/json"));
+				Assert.AreEqual("{\"ok\":false,\"error\":\"not_found\"}", Encoding.UTF8.GetString(missing.body));
+			}
+		}
+
+		[TestMethod]
+		public async Task TestPutRawValidation()
+		{
+			using (TestServer ts = new TestServer(s => s.rateLimits.writes.capacity = 100))
+			{
+				byte[] data = new byte[] { 1, 2, 3 };
+				string key = TestServer.NewKey();
+				Assert.AreEqual("bad_request", (await PutRaw(ts, data, null)).Error, "Missing key");
+				Assert.AreEqual("bad_request", (await PutRaw(ts, data, "key")).Error, "Key without a value");
+				Assert.AreEqual("invalid_key", (await PutRaw(ts, data, "key=")).Error);
+				Assert.AreEqual("invalid_key", (await PutRaw(ts, data, "key=settings")).Error);
+				Assert.AreEqual("invalid_key", (await PutRaw(ts, data, "key=" + key + "&key=" + key)).Error, "Duplicate parameters are not a valid key");
+				Assert.AreEqual("invalid_bucket", (await PutRaw(ts, data, "key=" + key + "&bucket=photo!")).Error);
+				Assert.AreEqual("unknown_bucket", (await PutRaw(ts, data, "key=" + key + "&bucket=nonexistent")).Error);
+				Assert.AreEqual("bucket_disabled", (await PutRaw(ts, data, "key=" + key + "&bucket=disabled")).Error);
+				Assert.AreEqual("bad_request", (await PutRaw(ts, data, "key=" + key + "&ttl=long")).Error);
+				Assert.AreEqual("bad_request", (await PutRaw(ts, data, "key=" + key + "&ttl=NaN")).Error);
+				Assert.AreEqual(60, (int)(await PutRaw(ts, data, "key=" + key + "&ttl=5")).Json["ttl"]);
+				Assert.AreEqual(600, (int)(await PutRaw(ts, data, "key=" + key + "&ttl=600.9")).Json["ttl"]);
+				Assert.AreEqual(3600, (int)(await PutRaw(ts, data, "key=" + key + "&ttl=")).Json["ttl"], "Empty ttl means the default");
+				Assert.AreEqual(200, (await PutRaw(ts, data, "key=" + key + "&bucket=")).Status, "Empty bucket means the default bucket");
+
+				// The bucket's own size limit applies, whether or not the length is known in advance.
+				ts.UpdateSettings(s => s.GetBucket("photos").maxItemSizeBytes = 1000);
+				foreach (bool chunked in new bool[] { false, true })
+				{
+					ApiResult tooLarge = await PutRaw(ts, RandomBytes(1001), "key=" + key + "&bucket=photos", chunked);
+					Assert.AreEqual(413, tooLarge.Status, tooLarge.ToString());
+					Assert.AreEqual("too_large", tooLarge.Error);
+					Assert.AreEqual(200, (await PutRaw(ts, RandomBytes(1000), "key=" + key + "&bucket=photos", chunked)).Status);
+				}
+				Assert.AreEqual(0, Directory.GetFiles(ts.Engine.Storage.TempDirectory).Length, "Partial uploads must be deleted");
+			}
+		}
+
+		[TestMethod]
+		public void TestPutRawTooLargeContentLengthRejectedWithoutReadingBody()
+		{
+			using (TestServer ts = new TestServer())
+			using (TcpClient client = new TcpClient())
+			{
+				client.ReceiveTimeout = 5000;
+				client.Connect(IPAddress.Loopback, ts.Port);
+				NetworkStream s = client.GetStream();
+				byte[] head = Encoding.ASCII.GetBytes("POST /v1/putraw?key=" + TestServer.NewKey() + " HTTP/1.1\r\nHost: localhost\r\nContent-Length: " + (5 * 1024 * 1024 + 1) + "\r\n\r\nAAAA");
+				s.Write(head, 0, head.Length);
+				string response = ReadHttpResponseHead(s);
+				Assert.IsTrue(response.StartsWith("HTTP/1.1 413"), response);
+			}
+		}
+
+		[TestMethod]
+		public async Task TestPutRawTruncatedUploadIsNotStored()
+		{
+			using (TestServer ts = new TestServer())
+			{
+				string key = TestServer.NewKey();
+				Assert.AreEqual(200, (await PutRaw(ts, new byte[] { 1, 2, 3 }, "key=" + key)).Status);
+				using (TcpClient client = new TcpClient())
+				{
+					client.Connect(IPAddress.Loopback, ts.Port);
+					NetworkStream s = client.GetStream();
+					byte[] head = Encoding.ASCII.GetBytes("POST /v1/putraw?key=" + key + " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1000\r\n\r\n0123456789");
+					s.Write(head, 0, head.Length);
+					s.Flush();
+					client.Client.Shutdown(SocketShutdown.Send); // The client disconnects before sending the rest of the body.
+					ReadHttpResponseHead(s);
+				}
+				for (int i = 0; i < 100 && Directory.GetFiles(ts.Engine.Storage.TempDirectory).Length > 0; i++)
+					await Task.Delay(20);
+				Assert.AreEqual(0, Directory.GetFiles(ts.Engine.Storage.TempDirectory).Length, "The partial upload must be deleted");
+				CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, (await GetRaw(ts, new { key })).body, "The truncated upload must not replace the stored value");
+			}
+		}
+
+		[TestMethod]
+		public async Task TestPutRawByteRateLimit()
+		{
+			using (TestServer ts = new TestServer(s => s.rateLimits.bytes.capacity = 3000))
+			{
+				Assert.AreEqual(200, (await PutRaw(ts, RandomBytes(2000), "key=" + TestServer.NewKey())).Status);
+				ApiResult limited = await PutRaw(ts, RandomBytes(2000), "key=" + TestServer.NewKey());
+				Assert.AreEqual(429, limited.Status);
+				Assert.IsTrue(int.Parse(limited.Headers["Retry-After"]) >= 1);
+				Assert.AreEqual(200, (await PutRaw(ts, RandomBytes(900), "key=" + TestServer.NewKey())).Status);
 			}
 		}
 

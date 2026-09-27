@@ -17,6 +17,10 @@ namespace KVStore
 		Puts,
 		/// <summary>"get" requests.</summary>
 		Gets,
+		/// <summary>"putraw" requests.</summary>
+		PutRaws,
+		/// <summary>"getraw" requests.</summary>
+		GetRaws,
 		/// <summary>"del" requests.</summary>
 		Dels,
 		/// <summary>"info" requests.</summary>

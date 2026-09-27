@@ -53,10 +53,6 @@ namespace KVStore
 		/// </summary>
 		public int publicHttpPort = DefaultPublicPort;
 		/// <summary>
-		/// An email address or URL where abuse reports and takedown requests can be sent.  Shown on the public landing page.
-		/// </summary>
-		public string abuseContact = "";
-		/// <summary>
 		/// Name of the operator of this service.  Shown on the public landing page and in the Terms of Service.
 		/// </summary>
 		public string operatorName = "";

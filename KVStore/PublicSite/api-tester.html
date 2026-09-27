@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>API tester - KVStore</title>
+<link rel="stylesheet" href="site.css">
+<script src="site.js" defer></script>
+<script src="api-tester.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+	<div class="topbar-inner">
+		<a class="brand" href="./">KVStore</a>
+		<nav>
+			<a href="./#api">API</a>
+			<a href="api-tester" aria-current="page">API tester</a>
+			<a href="./#terms">Terms</a>
+			<a href="takedown">Report &amp; remove content</a>
+		</nav>
+	</div>
+</header>
+<main>
+<h1>API tester</h1>
+<p class="lead">Send requests to this server's <a href="./#api">API</a> and see the responses.</p>
+<p class="small muted">These are real requests.  Values you store follow the normal rules: anyone who knows the key can read them until they expire.  Requests count toward your rate limits.</p>
+
+<form id="testerForm" class="card" autocomplete="off" novalidate>
+	<label class="field">
+		<span>Operation</span>
+		<select id="op">
+			<option value="put">put: store a value (base64 in JSON)</option>
+			<option value="putraw">putraw: store a value (raw request body)</option>
+			<option value="get">get: read a value (base64 in JSON)</option>
+			<option value="getraw">getraw: read a value (raw response body)</option>
+			<option value="info">info: check whether a value exists</option>
+			<option value="del">del: delete a value</option>
+			<option value="buckets">buckets: list buckets</option>
+			<option value="phrase">phrase: generate a word phrase</option>
+			<option value="health">health: service status</option>
+		</select>
+	</label>
+	<p class="opdesc"><span id="opDesc"></span> <a id="opDocs" href="./#api">Documentation</a></p>
+
+	<div class="fields">
+		<label class="field wide" data-for="put putraw get getraw info del">
+			<span>key <span class="req">required</span></span>
+			<span class="inline-row">
+				<input type="text" id="key" class="mono" maxlength="200" autocapitalize="off" spellcheck="false">
+				<button type="button" id="btnRandomKey" class="secondary">Random key</button>
+			</span>
+			<span class="hint">32 characters: letters a&ndash;z and digits 2&ndash;7.</span>
+		</label>
+		<label class="field" data-for="put putraw get getraw info del">
+			<span>bucket <span class="opt">optional</span></span>
+			<input type="text" id="bucket" class="mono" maxlength="64" autocapitalize="off" spellcheck="false" list="bucketList">
+			<span class="hint">Empty means the default bucket.</span>
+			<datalist id="bucketList"></datalist>
+		</label>
+		<label class="field" data-for="put putraw">
+			<span>ttl <span class="opt">optional</span></span>
+			<input type="number" id="ttl" step="1" min="0">
+			<span class="hint">Lifetime in seconds.  Empty means the bucket's default.</span>
+		</label>
+		<label class="field" data-for="phrase">
+			<span>words <span class="opt">optional</span></span>
+			<input type="number" id="words" step="1" min="1" max="20">
+			<span class="hint">5 to 10.  Empty means 6.</span>
+		</label>
+		<div class="field wide" data-for="put putraw">
+			<span>value <span class="req">required</span></span>
+			<span class="radios" role="radiogroup" aria-label="Value format">
+				<label><input type="radio" name="valueFormat" value="text" checked> Text (sent as UTF-8)</label>
+				<label><input type="radio" name="valueFormat" value="base64"> Base64</label>
+				<label><input type="radio" name="valueFormat" value="file"> File</label>
+			</span>
+			<textarea id="valueText" class="mono" rows="4" spellcheck="false" aria-label="Value"></textarea>
+			<input type="file" id="valueFile" aria-label="Value file" hidden>
+			<span class="hint" id="valueHint"></span>
+		</div>
+	</div>
+
+	<div class="actions">
+		<button type="submit" id="btnSend">Send request</button>
+		<span class="busy" id="busy" hidden><span class="spinner" aria-hidden="true"></span>Waiting for the response&hellip;</span>
+	</div>
+	<div id="formError" class="result err" role="alert" hidden></div>
+</form>
+
+<section id="output" hidden aria-live="polite">
+	<h3>Request</h3>
+	<pre class="output" id="requestText"></pre>
+	<h3>Response</h3>
+	<div class="statusline"><span class="status" id="status"></span><span class="muted small" id="timing"></span></div>
+	<pre class="output" id="responseHeaders" hidden></pre>
+	<pre class="output" id="responseBody"></pre>
+	<div id="notes"></div>
+</section>
+</main>
+</body>
+</html>

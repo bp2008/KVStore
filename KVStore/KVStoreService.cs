@@ -278,7 +278,6 @@ namespace KVStore
 				s.publicHttpPort = -1;
 			if (s.publicHttpPortValid() && (s.publicHttpPort == s.adminHttpPort || s.publicHttpPort == s.adminHttpsPort))
 				throw new Exception("The public API port (" + s.publicHttpPort + ") must be different from the Admin Console ports.");
-			s.abuseContact = s.abuseContact?.Trim() ?? "";
 			s.operatorName = s.operatorName?.Trim() ?? "";
 
 			// Validate Buckets

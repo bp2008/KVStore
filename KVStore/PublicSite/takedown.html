@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Remove content - KVStore</title>
+<link rel="stylesheet" href="site.css">
+<script src="site.js" defer></script>
+<script src="takedown.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+	<div class="topbar-inner">
+		<a class="brand" href="./">KVStore</a>
+		<nav>
+			<a href="./#api">API</a>
+			<a href="api-tester">API tester</a>
+			<a href="./#terms">Terms</a>
+			<a href="takedown" aria-current="page">Report &amp; remove content</a>
+		</nav>
+	</div>
+</header>
+<main class="narrow">
+<h1>Remove content</h1>
+<p class="lead">Found something on this service that shouldn't be here?  You can delete it yourself, right now.  You don't need an account, and you don't need to contact anyone.</p>
+
+<h3>What you need</h3>
+<p>Everything stored here is filed under a <strong>key</strong>: a long code, a bit like a password, that was chosen when the item was stored.  Items are also grouped into <strong>buckets</strong>, a bit like folders.  To delete an item, you need its exact key, and its bucket name if it isn't in the main bucket.  Nobody, including the people who run this service, can look items up any other way.</p>
+<ul>
+<li><strong>The key</strong> usually looks like this: <code>k5rqgl3wbv2nqv7zm4hy6i3yaq6ln2zk</code>.  It's 32 characters long and uses only letters and the digits 2 to 7.  Whoever shared the content had to pass the key along somehow, for example in a link, a QR code, or a message.</li>
+<li><strong>The bucket</strong> is only needed if you were given a bucket name.  Otherwise, leave it empty.</li>
+<li>If you only have a word phrase (like <code>crop-visor-quilt-nomad-brave-flint</code>) or a QR code that an app reads, the app may turn it into the key privately, so this form can't use it directly.</li>
+</ul>
+<p>Deleting is permanent and takes effect immediately.  Even if nobody deletes it, everything on this service deletes itself automatically within <span id="maxTtl">a few hours</span> of being stored.</p>
+
+<form id="takedownForm" class="card" autocomplete="off" novalidate>
+	<label class="field">
+		<span>Key</span>
+		<input type="text" id="key" class="mono" maxlength="200" autocapitalize="off" spellcheck="false" placeholder="e.g. k5rqgl3wbv2nqv7zm4hy6i3yaq6ln2zk" aria-describedby="keyHint">
+		<span class="hint" id="keyHint">Paste the whole key.  Spaces are removed automatically.</span>
+	</label>
+	<label class="field">
+		<span>Bucket <span class="muted">(optional)</span></span>
+		<input type="text" id="bucket" class="mono" maxlength="64" autocapitalize="off" spellcheck="false" list="bucketList" aria-describedby="bucketHint">
+		<span class="hint" id="bucketHint">Leave this empty unless you were given a bucket name.</span>
+		<datalist id="bucketList"></datalist>
+	</label>
+	<div class="actions">
+		<button type="submit" id="btnDelete">Delete this item</button>
+		<span class="busy" id="busy" hidden><span class="spinner" aria-hidden="true"></span>Deleting&hellip;</span>
+	</div>
+</form>
+<div id="result" aria-live="polite"></div>
+</main>
+</body>
+</html>
