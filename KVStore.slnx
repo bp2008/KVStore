@@ -2,4 +2,5 @@
   <Project Path="../BPUtil/BPUtil/BPUtil.csproj" />
   <Project Path="KVStore.Tests/KVStore.Tests.csproj" />
   <Project Path="KVStore/KVStore.csproj" />
+  <Project Path="ReleaseArchiver/ReleaseArchiver.csproj" />
 </Solution>

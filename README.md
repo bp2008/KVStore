@@ -142,6 +142,12 @@ Database damage is treated as a normal event rather than a crisis: every stored 
 
 Requires the .NET 10 SDK and a checkout of [BPUtil](https://github.com/bp2008/BPUtil) next to this repository (`../BPUtil`).  `KVStore.Tests` contains unit and integration tests (`dotnet test KVStore.Tests`).
 
+### Making a release
+
+1. Increase `<Version>` in `KVStore/KVStore.csproj`, then build the solution in Visual Studio using the **Release** configuration.
+2. Run `ReleaseArchiver/bin/ReleaseArchiver.exe`.  It creates `KVStore Linux <version>.zip` and `KVStore Windows <version>.zip` in the `Releases` folder.  It refuses to package a build that is missing, incomplete, or older than the source files.
+3. Create a GitHub release and attach both zip files.  The Linux installation script installs the release asset whose name contains `Linux`.
+
 ## Acknowledgements
 
 * `KVStore/Resources/eff_short_wordlist_1.txt` is the EFF Short Wordlist #1 by the [Electronic Frontier Foundation](https://www.eff.org/dice), licensed under [CC BY 3.0 US](https://creativecommons.org/licenses/by/3.0/us/).
