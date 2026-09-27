@@ -6,10 +6,14 @@
  * encryption convention, so data written by either client can be read by the other:
  *
  *   phrase     = 6 words from the EFF short wordlist #1                (~62 bits)
- *   material   = PBKDF2-SHA256(phrase, salt="bp2008-kv-v1", iterations=600000, dkLen=64)
+ *   material   = PBKDF2-SHA256(phrase, salt="bp2008-kv-v1", iterations=600000, dkLen=64)    (10000 iterations in "fast" mode)
  *   lookupKey  = base32(material[0..20])  -> 32 chars, sent to the server
  *   contentKey = material[32..64]         -> AES-256-GCM key, never transmitted
  *   stored     = 12-byte IV, then the AES-256-GCM ciphertext, then the 16-byte tag
+ *
+ * "fast" mode (new KVStoreClientLegacy(url, { keyDerivation: "fast" })) derives keys 60 times faster, at the cost of making phrases 60
+ * times cheaper to guess offline.  Use it only with randomly generated phrases of at least 6 words, and use the same mode on every
+ * device, because the two modes derive different keys.  See "Key derivation modes" in kvstore-client.js.
  *
  * Usage:
  *   var kv = new KVStoreClientLegacy("http://kv.example.com");
@@ -37,7 +41,8 @@
  * Promise, a callback is required.  Method names match kvstore-client.js.  Differences:
  *   - putRaw/getRaw use the "put"/"get" operations with base64 values, not "putraw"/"getraw", which need typed arrays.  They store and
  *     read the same items, so the two clients interoperate.  putRaw also accepts a string, which it encodes as UTF-8.
- *   - deriveKeys returns contentKey as a plain Array of 32 bytes, not a CryptoKey.
+ *   - deriveKeys returns contentKey as a plain Array of 32 bytes, not a CryptoKey, and takes the key derivation mode as its fourth
+ *     argument, after callback and onProgress: deriveKeys(phrase, callback, onProgress, mode).
  *   - The phrase argument of putEncrypted/getEncrypted/getEncryptedText may also be the object returned by deriveKeys, to avoid
  *     repeating the slow key derivation.
  *   - Errors that are not from the server have status 0 and one of these codes: "network_error" (no response: offline, DNS failure,
@@ -45,17 +50,19 @@
  *     "no_transport".  Local errors are Errors with a code: "decrypt_failed", "no_secure_random", "invalid_argument", "invalid_base64".
  *
  * Crypto.  SHA-256, HMAC-SHA256, PBKDF2, AES-256 (encryption direction only, which is all GCM needs), and GCM (with a 4-bit table
- * GHASH) are implemented in plain JavaScript.  Where crypto.subtle exists (secure contexts) and KVStoreClientLegacy.useNativeCrypto is
- * true (the default), PBKDF2 and AES-GCM use it instead.  If a native call fails, for example in a browser without native PBKDF2, the
- * pure-JS code runs instead.  Native AES-GCM decryption failures are also retried in pure JS, which then reports "decrypt_failed".
+ * GHASH) are implemented in plain JavaScript.  PBKDF2's inner loop (Pbkdf2Loop) is derived from asmcrypto.js, under the MIT License
+ * (see the notice there).  Where crypto.subtle exists (secure contexts) and KVStoreClientLegacy.useNativeCrypto is true (the default),
+ * PBKDF2 and AES-GCM use it instead.  If a native call fails, for example in a browser without native PBKDF2, the pure-JS code runs
+ * instead.  Native AES-GCM decryption failures are also retried in pure JS, which then reports "decrypt_failed".
  * Long pure-JS work is split into slices of about KVStoreClientLegacy.sliceMs milliseconds (default 50), separated by a yield to the
  * event loop (a MessageChannel message where MessageChannel exists, otherwise setTimeout).  This keeps the page responsive, and keeps
  * every single script execution short, which is what old Internet Explorer's "A script on this page is causing Internet Explorer to
  * run slowly" warning looks for.  The optional onProgress(fraction) callback reports key derivation progress.
- * 600,000 PBKDF2 iterations in pure JavaScript is slow.  Measured on one desktop PC: about 1.7 seconds in Node 24 (V8), versus about
- * 0.13 seconds natively, and about 10.5 seconds in Windows 11's MSHTML (the IE11 engine) in IE9 document mode.  Current browsers on
- * plain-http pages should be closer to Node.  A real IE9, with its older engine on hardware of its era, will probably take one to two
- * minutes (an estimate, not a measurement).  Show a progress indicator.
+ * 600,000 PBKDF2 iterations in pure JavaScript is slow.  Measured on one desktop PC: about 0.37 seconds in Node 24 (V8), 0.62 seconds
+ * in Chromium 152, versus about 0.12 seconds natively in both, and about 1.3 seconds in Windows 11's MSHTML (the IE11 engine) in IE9
+ * document mode.  A real IE9, with its older engine on hardware of its era, will probably take tens of seconds (an estimate, not a
+ * measurement).  Show a progress indicator.  "fast" mode (10,000 iterations) took about 7 milliseconds in Node and 45 milliseconds in
+ * MSHTML, and should take well under a second in a real IE9.
  *
  * Randomness.  crypto.getRandomValues (all current browsers, including on plain-http pages) or msCrypto.getRandomValues (IE11) is
  * used when present.  IE9 and IE10 have no cryptographically secure random number generator (CSPRNG), and Math.random is not one.
@@ -98,7 +105,7 @@
 	"use strict";
 
 	var SALT = "bp2008-kv-v1";
-	var PBKDF2_ITERATIONS = 600000;
+	var PBKDF2_ITERATIONS = { standard: 600000, fast: 10000 };
 	var BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 	var BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 	var SYNTHETIC_IV_LABEL = "bp2008-kv-v1 legacy synthetic IV";
@@ -682,11 +689,11 @@
 	}
 
 	/**
-	 * PBKDF2-HMAC-SHA256 as a time-sliceable job.  Every iteration after the first is exactly two compression function calls, with no allocation.
+	 * PBKDF2-HMAC-SHA256 as a time-sliceable job.  Each block's first iteration uses Sha256.  The rest, which are almost all of the work, run in Pbkdf2Loop.
 	 */
 	function Pbkdf2Job(password, salt, iterations, dkLen)
 	{
-		var states = hmacStates(password), i;
+		var states = hmacStates(password), si = states.inner, so = states.outer;
 		this.states = states;
 		this.salt = sliceBytes(salt, 0);
 		this.iterations = iterations;
@@ -694,43 +701,27 @@
 		this.blocks = Math.ceil(dkLen / 32);
 		this.block = 0;
 		this.iteration = 0;
-		this.u = [0, 0, 0, 0, 0, 0, 0, 0];
-		this.t = [0, 0, 0, 0, 0, 0, 0, 0];
-		this.inner = [0, 0, 0, 0, 0, 0, 0, 0];
 		this.output = [];
 		this.result = null;
-		// The message of both hashes in an iteration is 32 bytes after a 64-byte pad block: one block with fixed padding and a length of 96 bytes.
-		this.w = new Array(64);
-		this.w[8] = 0x80000000 | 0;
-		for (i = 9; i < 15; i++)
-			this.w[i] = 0;
-		this.w[15] = (64 + 32) * 8;
+		this.loop = Pbkdf2Loop();
+		this.loop.setPads(si[0], si[1], si[2], si[3], si[4], si[5], si[6], si[7], so[0], so[1], so[2], so[3], so[4], so[5], so[6], so[7]);
 	}
 	Pbkdf2Job.prototype.step = function ()
 	{
-		var u = this.u, t = this.t, w = this.w, inner = this.inner, si = this.states.inner, so = this.states.outer, k, n, end;
+		var loop = this.loop, u, end;
 		if (this.iteration === 0)
 		{
 			// U1 = HMAC(password, salt + INT32BE(block number)).
-			var blockNumber = this.block + 1;
-			var first = hmacFinish(this.states, new Sha256(si, 64).update(this.salt).update(wordsToBytes([blockNumber])));
-			for (k = 0; k < 8; k++)
-				u[k] = t[k] = first[k];
+			u = hmacFinish(this.states, new Sha256(this.states.inner, 64).update(this.salt).update(wordsToBytes([this.block + 1])));
+			loop.setFirst(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]);
 			this.iteration = 1;
 		}
 		end = Math.min(this.iteration + 256, this.iterations);
-		for (n = this.iteration; n < end; n++)
-		{
-			w[0] = u[0]; w[1] = u[1]; w[2] = u[2]; w[3] = u[3]; w[4] = u[4]; w[5] = u[5]; w[6] = u[6]; w[7] = u[7];
-			sha256Compress(si, w, inner);
-			w[0] = inner[0]; w[1] = inner[1]; w[2] = inner[2]; w[3] = inner[3]; w[4] = inner[4]; w[5] = inner[5]; w[6] = inner[6]; w[7] = inner[7];
-			sha256Compress(so, w, u);
-			t[0] ^= u[0]; t[1] ^= u[1]; t[2] ^= u[2]; t[3] ^= u[3]; t[4] ^= u[4]; t[5] ^= u[5]; t[6] ^= u[6]; t[7] ^= u[7];
-		}
+		loop.iterate(end - this.iteration);
 		this.iteration = end;
 		if (end < this.iterations)
 			return false;
-		this.output = this.output.concat(wordsToBytes(t));
+		this.output = this.output.concat(wordsToBytes([loop.result(0), loop.result(1), loop.result(2), loop.result(3), loop.result(4), loop.result(5), loop.result(6), loop.result(7)]));
 		this.block++;
 		this.iteration = 0;
 		if (this.block < this.blocks)
@@ -742,6 +733,579 @@
 	{
 		return (this.block * this.iterations + this.iteration) / (this.blocks * this.iterations);
 	};
+	// #endregion
+
+	// #region PBKDF2 inner loop (asm.js, from asmcrypto.js)
+	/*
+	 * Pbkdf2Loop is derived from the SHA-256 module of asmcrypto.js 0.22.0 (src/hash/sha256/sha256.asm.js, https://github.com/asmcrypto/asmcrypto.js).
+	 * _core is copied unchanged except for indentation and brace placement.  The iteration loop is pbkdf2_generate_block's, split into
+	 * functions so that the work can be time sliced, and without the heap (typed array), so it also runs in browsers without typed arrays.
+	 * _core is fully unrolled and keeps everything in local variables, which makes it much faster than sha256Compress (about 2.6 times in
+	 * V8 and 6 times in IE's Chakra).  Where the engine compiles asm.js ahead of time, as Node 24's V8 does, it is faster again.
+	 *
+	 * The MIT License (MIT)
+	 *
+	 * Copyright (c) 2013 Artem S Vybornov
+	 *
+	 * Permission is hereby granted, free of charge, to any person obtaining a copy of
+	 * this software and associated documentation files (the "Software"), to deal in
+	 * the Software without restriction, including without limitation the rights to
+	 * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+	 * the Software, and to permit persons to whom the Software is furnished to do so,
+	 * subject to the following conditions:
+	 *
+	 * The above copyright notice and this permission notice shall be included in all
+	 * copies or substantial portions of the Software.
+	 *
+	 * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+	 * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+	 * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+	 * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+	 * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+	 * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+	 */
+	function Pbkdf2Loop()
+	{
+		"use asm";
+
+		// SHA256 state
+		var H0 = 0, H1 = 0, H2 = 0, H3 = 0, H4 = 0, H5 = 0, H6 = 0, H7 = 0;
+
+		// HMAC state: the SHA-256 states after the inner and outer pad blocks
+		var I0 = 0, I1 = 0, I2 = 0, I3 = 0, I4 = 0, I5 = 0, I6 = 0, I7 = 0,
+			O0 = 0, O1 = 0, O2 = 0, O3 = 0, O4 = 0, O5 = 0, O6 = 0, O7 = 0;
+
+		// PBKDF2 state: the latest U, and the XOR of every U so far
+		var U0 = 0, U1 = 0, U2 = 0, U3 = 0, U4 = 0, U5 = 0, U6 = 0, U7 = 0,
+			X0 = 0, X1 = 0, X2 = 0, X3 = 0, X4 = 0, X5 = 0, X6 = 0, X7 = 0;
+
+		function _core(w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15)
+		{
+			w0 = w0|0;
+			w1 = w1|0;
+			w2 = w2|0;
+			w3 = w3|0;
+			w4 = w4|0;
+			w5 = w5|0;
+			w6 = w6|0;
+			w7 = w7|0;
+			w8 = w8|0;
+			w9 = w9|0;
+			w10 = w10|0;
+			w11 = w11|0;
+			w12 = w12|0;
+			w13 = w13|0;
+			w14 = w14|0;
+			w15 = w15|0;
+
+			var a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0;
+
+			a = H0;
+			b = H1;
+			c = H2;
+			d = H3;
+			e = H4;
+			f = H5;
+			g = H6;
+			h = H7;
+
+			// 0
+			h = ( w0 + h + ( e>>>6 ^ e>>>11 ^ e>>>25 ^ e<<26 ^ e<<21 ^ e<<7 ) +  ( g ^ e & (f^g) ) + 0x428a2f98 )|0;
+			d = ( d + h )|0;
+			h = ( h + ( (a & b) ^ ( c & (a ^ b) ) ) + ( a>>>2 ^ a>>>13 ^ a>>>22 ^ a<<30 ^ a<<19 ^ a<<10 ) )|0;
+
+			// 1
+			g = ( w1 + g + ( d>>>6 ^ d>>>11 ^ d>>>25 ^ d<<26 ^ d<<21 ^ d<<7 ) +  ( f ^ d & (e^f) ) + 0x71374491 )|0;
+			c = ( c + g )|0;
+			g = ( g + ( (h & a) ^ ( b & (h ^ a) ) ) + ( h>>>2 ^ h>>>13 ^ h>>>22 ^ h<<30 ^ h<<19 ^ h<<10 ) )|0;
+
+			// 2
+			f = ( w2 + f + ( c>>>6 ^ c>>>11 ^ c>>>25 ^ c<<26 ^ c<<21 ^ c<<7 ) +  ( e ^ c & (d^e) ) + 0xb5c0fbcf )|0;
+			b = ( b + f )|0;
+			f = ( f + ( (g & h) ^ ( a & (g ^ h) ) ) + ( g>>>2 ^ g>>>13 ^ g>>>22 ^ g<<30 ^ g<<19 ^ g<<10 ) )|0;
+
+			// 3
+			e = ( w3 + e + ( b>>>6 ^ b>>>11 ^ b>>>25 ^ b<<26 ^ b<<21 ^ b<<7 ) +  ( d ^ b & (c^d) ) + 0xe9b5dba5 )|0;
+			a = ( a + e )|0;
+			e = ( e + ( (f & g) ^ ( h & (f ^ g) ) ) + ( f>>>2 ^ f>>>13 ^ f>>>22 ^ f<<30 ^ f<<19 ^ f<<10 ) )|0;
+
+			// 4
+			d = ( w4 + d + ( a>>>6 ^ a>>>11 ^ a>>>25 ^ a<<26 ^ a<<21 ^ a<<7 ) +  ( c ^ a & (b^c) ) + 0x3956c25b )|0;
+			h = ( h + d )|0;
+			d = ( d + ( (e & f) ^ ( g & (e ^ f) ) ) + ( e>>>2 ^ e>>>13 ^ e>>>22 ^ e<<30 ^ e<<19 ^ e<<10 ) )|0;
+
+			// 5
+			c = ( w5 + c + ( h>>>6 ^ h>>>11 ^ h>>>25 ^ h<<26 ^ h<<21 ^ h<<7 ) +  ( b ^ h & (a^b) ) + 0x59f111f1 )|0;
+			g = ( g + c )|0;
+			c = ( c + ( (d & e) ^ ( f & (d ^ e) ) ) + ( d>>>2 ^ d>>>13 ^ d>>>22 ^ d<<30 ^ d<<19 ^ d<<10 ) )|0;
+
+			// 6
+			b = ( w6 + b + ( g>>>6 ^ g>>>11 ^ g>>>25 ^ g<<26 ^ g<<21 ^ g<<7 ) +  ( a ^ g & (h^a) ) + 0x923f82a4 )|0;
+			f = ( f + b )|0;
+			b = ( b + ( (c & d) ^ ( e & (c ^ d) ) ) + ( c>>>2 ^ c>>>13 ^ c>>>22 ^ c<<30 ^ c<<19 ^ c<<10 ) )|0;
+
+			// 7
+			a = ( w7 + a + ( f>>>6 ^ f>>>11 ^ f>>>25 ^ f<<26 ^ f<<21 ^ f<<7 ) +  ( h ^ f & (g^h) ) + 0xab1c5ed5 )|0;
+			e = ( e + a )|0;
+			a = ( a + ( (b & c) ^ ( d & (b ^ c) ) ) + ( b>>>2 ^ b>>>13 ^ b>>>22 ^ b<<30 ^ b<<19 ^ b<<10 ) )|0;
+
+			// 8
+			h = ( w8 + h + ( e>>>6 ^ e>>>11 ^ e>>>25 ^ e<<26 ^ e<<21 ^ e<<7 ) +  ( g ^ e & (f^g) ) + 0xd807aa98 )|0;
+			d = ( d + h )|0;
+			h = ( h + ( (a & b) ^ ( c & (a ^ b) ) ) + ( a>>>2 ^ a>>>13 ^ a>>>22 ^ a<<30 ^ a<<19 ^ a<<10 ) )|0;
+
+			// 9
+			g = ( w9 + g + ( d>>>6 ^ d>>>11 ^ d>>>25 ^ d<<26 ^ d<<21 ^ d<<7 ) +  ( f ^ d & (e^f) ) + 0x12835b01 )|0;
+			c = ( c + g )|0;
+			g = ( g + ( (h & a) ^ ( b & (h ^ a) ) ) + ( h>>>2 ^ h>>>13 ^ h>>>22 ^ h<<30 ^ h<<19 ^ h<<10 ) )|0;
+
+			// 10
+			f = ( w10 + f + ( c>>>6 ^ c>>>11 ^ c>>>25 ^ c<<26 ^ c<<21 ^ c<<7 ) +  ( e ^ c & (d^e) ) + 0x243185be )|0;
+			b = ( b + f )|0;
+			f = ( f + ( (g & h) ^ ( a & (g ^ h) ) ) + ( g>>>2 ^ g>>>13 ^ g>>>22 ^ g<<30 ^ g<<19 ^ g<<10 ) )|0;
+
+			// 11
+			e = ( w11 + e + ( b>>>6 ^ b>>>11 ^ b>>>25 ^ b<<26 ^ b<<21 ^ b<<7 ) +  ( d ^ b & (c^d) ) + 0x550c7dc3 )|0;
+			a = ( a + e )|0;
+			e = ( e + ( (f & g) ^ ( h & (f ^ g) ) ) + ( f>>>2 ^ f>>>13 ^ f>>>22 ^ f<<30 ^ f<<19 ^ f<<10 ) )|0;
+
+			// 12
+			d = ( w12 + d + ( a>>>6 ^ a>>>11 ^ a>>>25 ^ a<<26 ^ a<<21 ^ a<<7 ) +  ( c ^ a & (b^c) ) + 0x72be5d74 )|0;
+			h = ( h + d )|0;
+			d = ( d + ( (e & f) ^ ( g & (e ^ f) ) ) + ( e>>>2 ^ e>>>13 ^ e>>>22 ^ e<<30 ^ e<<19 ^ e<<10 ) )|0;
+
+			// 13
+			c = ( w13 + c + ( h>>>6 ^ h>>>11 ^ h>>>25 ^ h<<26 ^ h<<21 ^ h<<7 ) +  ( b ^ h & (a^b) ) + 0x80deb1fe )|0;
+			g = ( g + c )|0;
+			c = ( c + ( (d & e) ^ ( f & (d ^ e) ) ) + ( d>>>2 ^ d>>>13 ^ d>>>22 ^ d<<30 ^ d<<19 ^ d<<10 ) )|0;
+
+			// 14
+			b = ( w14 + b + ( g>>>6 ^ g>>>11 ^ g>>>25 ^ g<<26 ^ g<<21 ^ g<<7 ) +  ( a ^ g & (h^a) ) + 0x9bdc06a7 )|0;
+			f = ( f + b )|0;
+			b = ( b + ( (c & d) ^ ( e & (c ^ d) ) ) + ( c>>>2 ^ c>>>13 ^ c>>>22 ^ c<<30 ^ c<<19 ^ c<<10 ) )|0;
+
+			// 15
+			a = ( w15 + a + ( f>>>6 ^ f>>>11 ^ f>>>25 ^ f<<26 ^ f<<21 ^ f<<7 ) +  ( h ^ f & (g^h) ) + 0xc19bf174 )|0;
+			e = ( e + a )|0;
+			a = ( a + ( (b & c) ^ ( d & (b ^ c) ) ) + ( b>>>2 ^ b>>>13 ^ b>>>22 ^ b<<30 ^ b<<19 ^ b<<10 ) )|0;
+
+			// 16
+			w0 = ( ( w1>>>7  ^ w1>>>18 ^ w1>>>3  ^ w1<<25 ^ w1<<14 ) + ( w14>>>17 ^ w14>>>19 ^ w14>>>10 ^ w14<<15 ^ w14<<13 ) + w0 + w9 )|0;
+			h = ( w0 + h + ( e>>>6 ^ e>>>11 ^ e>>>25 ^ e<<26 ^ e<<21 ^ e<<7 ) +  ( g ^ e & (f^g) ) + 0xe49b69c1 )|0;
+			d = ( d + h )|0;
+			h = ( h + ( (a & b) ^ ( c & (a ^ b) ) ) + ( a>>>2 ^ a>>>13 ^ a>>>22 ^ a<<30 ^ a<<19 ^ a<<10 ) )|0;
+
+			// 17
+			w1 = ( ( w2>>>7  ^ w2>>>18 ^ w2>>>3  ^ w2<<25 ^ w2<<14 ) + ( w15>>>17 ^ w15>>>19 ^ w15>>>10 ^ w15<<15 ^ w15<<13 ) + w1 + w10 )|0;
+			g = ( w1 + g + ( d>>>6 ^ d>>>11 ^ d>>>25 ^ d<<26 ^ d<<21 ^ d<<7 ) +  ( f ^ d & (e^f) ) + 0xefbe4786 )|0;
+			c = ( c + g )|0;
+			g = ( g + ( (h & a) ^ ( b & (h ^ a) ) ) + ( h>>>2 ^ h>>>13 ^ h>>>22 ^ h<<30 ^ h<<19 ^ h<<10 ) )|0;
+
+			// 18
+			w2 = ( ( w3>>>7  ^ w3>>>18 ^ w3>>>3  ^ w3<<25 ^ w3<<14 ) + ( w0>>>17 ^ w0>>>19 ^ w0>>>10 ^ w0<<15 ^ w0<<13 ) + w2 + w11 )|0;
+			f = ( w2 + f + ( c>>>6 ^ c>>>11 ^ c>>>25 ^ c<<26 ^ c<<21 ^ c<<7 ) +  ( e ^ c & (d^e) ) + 0x0fc19dc6 )|0;
+			b = ( b + f )|0;
+			f = ( f + ( (g & h) ^ ( a & (g ^ h) ) ) + ( g>>>2 ^ g>>>13 ^ g>>>22 ^ g<<30 ^ g<<19 ^ g<<10 ) )|0;
+
+			// 19
+			w3 = ( ( w4>>>7  ^ w4>>>18 ^ w4>>>3  ^ w4<<25 ^ w4<<14 ) + ( w1>>>17 ^ w1>>>19 ^ w1>>>10 ^ w1<<15 ^ w1<<13 ) + w3 + w12 )|0;
+			e = ( w3 + e + ( b>>>6 ^ b>>>11 ^ b>>>25 ^ b<<26 ^ b<<21 ^ b<<7 ) +  ( d ^ b & (c^d) ) + 0x240ca1cc )|0;
+			a = ( a + e )|0;
+			e = ( e + ( (f & g) ^ ( h & (f ^ g) ) ) + ( f>>>2 ^ f>>>13 ^ f>>>22 ^ f<<30 ^ f<<19 ^ f<<10 ) )|0;
+
+			// 20
+			w4 = ( ( w5>>>7  ^ w5>>>18 ^ w5>>>3  ^ w5<<25 ^ w5<<14 ) + ( w2>>>17 ^ w2>>>19 ^ w2>>>10 ^ w2<<15 ^ w2<<13 ) + w4 + w13 )|0;
+			d = ( w4 + d + ( a>>>6 ^ a>>>11 ^ a>>>25 ^ a<<26 ^ a<<21 ^ a<<7 ) +  ( c ^ a & (b^c) ) + 0x2de92c6f )|0;
+			h = ( h + d )|0;
+			d = ( d + ( (e & f) ^ ( g & (e ^ f) ) ) + ( e>>>2 ^ e>>>13 ^ e>>>22 ^ e<<30 ^ e<<19 ^ e<<10 ) )|0;
+
+			// 21
+			w5 = ( ( w6>>>7  ^ w6>>>18 ^ w6>>>3  ^ w6<<25 ^ w6<<14 ) + ( w3>>>17 ^ w3>>>19 ^ w3>>>10 ^ w3<<15 ^ w3<<13 ) + w5 + w14 )|0;
+			c = ( w5 + c + ( h>>>6 ^ h>>>11 ^ h>>>25 ^ h<<26 ^ h<<21 ^ h<<7 ) +  ( b ^ h & (a^b) ) + 0x4a7484aa )|0;
+			g = ( g + c )|0;
+			c = ( c + ( (d & e) ^ ( f & (d ^ e) ) ) + ( d>>>2 ^ d>>>13 ^ d>>>22 ^ d<<30 ^ d<<19 ^ d<<10 ) )|0;
+
+			// 22
+			w6 = ( ( w7>>>7  ^ w7>>>18 ^ w7>>>3  ^ w7<<25 ^ w7<<14 ) + ( w4>>>17 ^ w4>>>19 ^ w4>>>10 ^ w4<<15 ^ w4<<13 ) + w6 + w15 )|0;
+			b = ( w6 + b + ( g>>>6 ^ g>>>11 ^ g>>>25 ^ g<<26 ^ g<<21 ^ g<<7 ) +  ( a ^ g & (h^a) ) + 0x5cb0a9dc )|0;
+			f = ( f + b )|0;
+			b = ( b + ( (c & d) ^ ( e & (c ^ d) ) ) + ( c>>>2 ^ c>>>13 ^ c>>>22 ^ c<<30 ^ c<<19 ^ c<<10 ) )|0;
+
+			// 23
+			w7 = ( ( w8>>>7  ^ w8>>>18 ^ w8>>>3  ^ w8<<25 ^ w8<<14 ) + ( w5>>>17 ^ w5>>>19 ^ w5>>>10 ^ w5<<15 ^ w5<<13 ) + w7 + w0 )|0;
+			a = ( w7 + a + ( f>>>6 ^ f>>>11 ^ f>>>25 ^ f<<26 ^ f<<21 ^ f<<7 ) +  ( h ^ f & (g^h) ) + 0x76f988da )|0;
+			e = ( e + a )|0;
+			a = ( a + ( (b & c) ^ ( d & (b ^ c) ) ) + ( b>>>2 ^ b>>>13 ^ b>>>22 ^ b<<30 ^ b<<19 ^ b<<10 ) )|0;
+
+			// 24
+			w8 = ( ( w9>>>7  ^ w9>>>18 ^ w9>>>3  ^ w9<<25 ^ w9<<14 ) + ( w6>>>17 ^ w6>>>19 ^ w6>>>10 ^ w6<<15 ^ w6<<13 ) + w8 + w1 )|0;
+			h = ( w8 + h + ( e>>>6 ^ e>>>11 ^ e>>>25 ^ e<<26 ^ e<<21 ^ e<<7 ) +  ( g ^ e & (f^g) ) + 0x983e5152 )|0;
+			d = ( d + h )|0;
+			h = ( h + ( (a & b) ^ ( c & (a ^ b) ) ) + ( a>>>2 ^ a>>>13 ^ a>>>22 ^ a<<30 ^ a<<19 ^ a<<10 ) )|0;
+
+			// 25
+			w9 = ( ( w10>>>7  ^ w10>>>18 ^ w10>>>3  ^ w10<<25 ^ w10<<14 ) + ( w7>>>17 ^ w7>>>19 ^ w7>>>10 ^ w7<<15 ^ w7<<13 ) + w9 + w2 )|0;
+			g = ( w9 + g + ( d>>>6 ^ d>>>11 ^ d>>>25 ^ d<<26 ^ d<<21 ^ d<<7 ) +  ( f ^ d & (e^f) ) + 0xa831c66d )|0;
+			c = ( c + g )|0;
+			g = ( g + ( (h & a) ^ ( b & (h ^ a) ) ) + ( h>>>2 ^ h>>>13 ^ h>>>22 ^ h<<30 ^ h<<19 ^ h<<10 ) )|0;
+
+			// 26
+			w10 = ( ( w11>>>7  ^ w11>>>18 ^ w11>>>3  ^ w11<<25 ^ w11<<14 ) + ( w8>>>17 ^ w8>>>19 ^ w8>>>10 ^ w8<<15 ^ w8<<13 ) + w10 + w3 )|0;
+			f = ( w10 + f + ( c>>>6 ^ c>>>11 ^ c>>>25 ^ c<<26 ^ c<<21 ^ c<<7 ) +  ( e ^ c & (d^e) ) + 0xb00327c8 )|0;
+			b = ( b + f )|0;
+			f = ( f + ( (g & h) ^ ( a & (g ^ h) ) ) + ( g>>>2 ^ g>>>13 ^ g>>>22 ^ g<<30 ^ g<<19 ^ g<<10 ) )|0;
+
+			// 27
+			w11 = ( ( w12>>>7  ^ w12>>>18 ^ w12>>>3  ^ w12<<25 ^ w12<<14 ) + ( w9>>>17 ^ w9>>>19 ^ w9>>>10 ^ w9<<15 ^ w9<<13 ) + w11 + w4 )|0;
+			e = ( w11 + e + ( b>>>6 ^ b>>>11 ^ b>>>25 ^ b<<26 ^ b<<21 ^ b<<7 ) +  ( d ^ b & (c^d) ) + 0xbf597fc7 )|0;
+			a = ( a + e )|0;
+			e = ( e + ( (f & g) ^ ( h & (f ^ g) ) ) + ( f>>>2 ^ f>>>13 ^ f>>>22 ^ f<<30 ^ f<<19 ^ f<<10 ) )|0;
+
+			// 28
+			w12 = ( ( w13>>>7  ^ w13>>>18 ^ w13>>>3  ^ w13<<25 ^ w13<<14 ) + ( w10>>>17 ^ w10>>>19 ^ w10>>>10 ^ w10<<15 ^ w10<<13 ) + w12 + w5 )|0;
+			d = ( w12 + d + ( a>>>6 ^ a>>>11 ^ a>>>25 ^ a<<26 ^ a<<21 ^ a<<7 ) +  ( c ^ a & (b^c) ) + 0xc6e00bf3 )|0;
+			h = ( h + d )|0;
+			d = ( d + ( (e & f) ^ ( g & (e ^ f) ) ) + ( e>>>2 ^ e>>>13 ^ e>>>22 ^ e<<30 ^ e<<19 ^ e<<10 ) )|0;
+
+			// 29
+			w13 = ( ( w14>>>7  ^ w14>>>18 ^ w14>>>3  ^ w14<<25 ^ w14<<14 ) + ( w11>>>17 ^ w11>>>19 ^ w11>>>10 ^ w11<<15 ^ w11<<13 ) + w13 + w6 )|0;
+			c = ( w13 + c + ( h>>>6 ^ h>>>11 ^ h>>>25 ^ h<<26 ^ h<<21 ^ h<<7 ) +  ( b ^ h & (a^b) ) + 0xd5a79147 )|0;
+			g = ( g + c )|0;
+			c = ( c + ( (d & e) ^ ( f & (d ^ e) ) ) + ( d>>>2 ^ d>>>13 ^ d>>>22 ^ d<<30 ^ d<<19 ^ d<<10 ) )|0;
+
+			// 30
+			w14 = ( ( w15>>>7  ^ w15>>>18 ^ w15>>>3  ^ w15<<25 ^ w15<<14 ) + ( w12>>>17 ^ w12>>>19 ^ w12>>>10 ^ w12<<15 ^ w12<<13 ) + w14 + w7 )|0;
+			b = ( w14 + b + ( g>>>6 ^ g>>>11 ^ g>>>25 ^ g<<26 ^ g<<21 ^ g<<7 ) +  ( a ^ g & (h^a) ) + 0x06ca6351 )|0;
+			f = ( f + b )|0;
+			b = ( b + ( (c & d) ^ ( e & (c ^ d) ) ) + ( c>>>2 ^ c>>>13 ^ c>>>22 ^ c<<30 ^ c<<19 ^ c<<10 ) )|0;
+
+			// 31
+			w15 = ( ( w0>>>7  ^ w0>>>18 ^ w0>>>3  ^ w0<<25 ^ w0<<14 ) + ( w13>>>17 ^ w13>>>19 ^ w13>>>10 ^ w13<<15 ^ w13<<13 ) + w15 + w8 )|0;
+			a = ( w15 + a + ( f>>>6 ^ f>>>11 ^ f>>>25 ^ f<<26 ^ f<<21 ^ f<<7 ) +  ( h ^ f & (g^h) ) + 0x14292967 )|0;
+			e = ( e + a )|0;
+			a = ( a + ( (b & c) ^ ( d & (b ^ c) ) ) + ( b>>>2 ^ b>>>13 ^ b>>>22 ^ b<<30 ^ b<<19 ^ b<<10 ) )|0;
+
+			// 32
+			w0 = ( ( w1>>>7  ^ w1>>>18 ^ w1>>>3  ^ w1<<25 ^ w1<<14 ) + ( w14>>>17 ^ w14>>>19 ^ w14>>>10 ^ w14<<15 ^ w14<<13 ) + w0 + w9 )|0;
+			h = ( w0 + h + ( e>>>6 ^ e>>>11 ^ e>>>25 ^ e<<26 ^ e<<21 ^ e<<7 ) +  ( g ^ e & (f^g) ) + 0x27b70a85 )|0;
+			d = ( d + h )|0;
+			h = ( h + ( (a & b) ^ ( c & (a ^ b) ) ) + ( a>>>2 ^ a>>>13 ^ a>>>22 ^ a<<30 ^ a<<19 ^ a<<10 ) )|0;
+
+			// 33
+			w1 = ( ( w2>>>7  ^ w2>>>18 ^ w2>>>3  ^ w2<<25 ^ w2<<14 ) + ( w15>>>17 ^ w15>>>19 ^ w15>>>10 ^ w15<<15 ^ w15<<13 ) + w1 + w10 )|0;
+			g = ( w1 + g + ( d>>>6 ^ d>>>11 ^ d>>>25 ^ d<<26 ^ d<<21 ^ d<<7 ) +  ( f ^ d & (e^f) ) + 0x2e1b2138 )|0;
+			c = ( c + g )|0;
+			g = ( g + ( (h & a) ^ ( b & (h ^ a) ) ) + ( h>>>2 ^ h>>>13 ^ h>>>22 ^ h<<30 ^ h<<19 ^ h<<10 ) )|0;
+
+			// 34
+			w2 = ( ( w3>>>7  ^ w3>>>18 ^ w3>>>3  ^ w3<<25 ^ w3<<14 ) + ( w0>>>17 ^ w0>>>19 ^ w0>>>10 ^ w0<<15 ^ w0<<13 ) + w2 + w11 )|0;
+			f = ( w2 + f + ( c>>>6 ^ c>>>11 ^ c>>>25 ^ c<<26 ^ c<<21 ^ c<<7 ) +  ( e ^ c & (d^e) ) + 0x4d2c6dfc )|0;
+			b = ( b + f )|0;
+			f = ( f + ( (g & h) ^ ( a & (g ^ h) ) ) + ( g>>>2 ^ g>>>13 ^ g>>>22 ^ g<<30 ^ g<<19 ^ g<<10 ) )|0;
+
+			// 35
+			w3 = ( ( w4>>>7  ^ w4>>>18 ^ w4>>>3  ^ w4<<25 ^ w4<<14 ) + ( w1>>>17 ^ w1>>>19 ^ w1>>>10 ^ w1<<15 ^ w1<<13 ) + w3 + w12 )|0;
+			e = ( w3 + e + ( b>>>6 ^ b>>>11 ^ b>>>25 ^ b<<26 ^ b<<21 ^ b<<7 ) +  ( d ^ b & (c^d) ) + 0x53380d13 )|0;
+			a = ( a + e )|0;
+			e = ( e + ( (f & g) ^ ( h & (f ^ g) ) ) + ( f>>>2 ^ f>>>13 ^ f>>>22 ^ f<<30 ^ f<<19 ^ f<<10 ) )|0;
+
+			// 36
+			w4 = ( ( w5>>>7  ^ w5>>>18 ^ w5>>>3  ^ w5<<25 ^ w5<<14 ) + ( w2>>>17 ^ w2>>>19 ^ w2>>>10 ^ w2<<15 ^ w2<<13 ) + w4 + w13 )|0;
+			d = ( w4 + d + ( a>>>6 ^ a>>>11 ^ a>>>25 ^ a<<26 ^ a<<21 ^ a<<7 ) +  ( c ^ a & (b^c) ) + 0x650a7354 )|0;
+			h = ( h + d )|0;
+			d = ( d + ( (e & f) ^ ( g & (e ^ f) ) ) + ( e>>>2 ^ e>>>13 ^ e>>>22 ^ e<<30 ^ e<<19 ^ e<<10 ) )|0;
+
+			// 37
+			w5 = ( ( w6>>>7  ^ w6>>>18 ^ w6>>>3  ^ w6<<25 ^ w6<<14 ) + ( w3>>>17 ^ w3>>>19 ^ w3>>>10 ^ w3<<15 ^ w3<<13 ) + w5 + w14 )|0;
+			c = ( w5 + c + ( h>>>6 ^ h>>>11 ^ h>>>25 ^ h<<26 ^ h<<21 ^ h<<7 ) +  ( b ^ h & (a^b) ) + 0x766a0abb )|0;
+			g = ( g + c )|0;
+			c = ( c + ( (d & e) ^ ( f & (d ^ e) ) ) + ( d>>>2 ^ d>>>13 ^ d>>>22 ^ d<<30 ^ d<<19 ^ d<<10 ) )|0;
+
+			// 38
+			w6 = ( ( w7>>>7  ^ w7>>>18 ^ w7>>>3  ^ w7<<25 ^ w7<<14 ) + ( w4>>>17 ^ w4>>>19 ^ w4>>>10 ^ w4<<15 ^ w4<<13 ) + w6 + w15 )|0;
+			b = ( w6 + b + ( g>>>6 ^ g>>>11 ^ g>>>25 ^ g<<26 ^ g<<21 ^ g<<7 ) +  ( a ^ g & (h^a) ) + 0x81c2c92e )|0;
+			f = ( f + b )|0;
+			b = ( b + ( (c & d) ^ ( e & (c ^ d) ) ) + ( c>>>2 ^ c>>>13 ^ c>>>22 ^ c<<30 ^ c<<19 ^ c<<10 ) )|0;
+
+			// 39
+			w7 = ( ( w8>>>7  ^ w8>>>18 ^ w8>>>3  ^ w8<<25 ^ w8<<14 ) + ( w5>>>17 ^ w5>>>19 ^ w5>>>10 ^ w5<<15 ^ w5<<13 ) + w7 + w0 )|0;
+			a = ( w7 + a + ( f>>>6 ^ f>>>11 ^ f>>>25 ^ f<<26 ^ f<<21 ^ f<<7 ) +  ( h ^ f & (g^h) ) + 0x92722c85 )|0;
+			e = ( e + a )|0;
+			a = ( a + ( (b & c) ^ ( d & (b ^ c) ) ) + ( b>>>2 ^ b>>>13 ^ b>>>22 ^ b<<30 ^ b<<19 ^ b<<10 ) )|0;
+
+			// 40
+			w8 = ( ( w9>>>7  ^ w9>>>18 ^ w9>>>3  ^ w9<<25 ^ w9<<14 ) + ( w6>>>17 ^ w6>>>19 ^ w6>>>10 ^ w6<<15 ^ w6<<13 ) + w8 + w1 )|0;
+			h = ( w8 + h + ( e>>>6 ^ e>>>11 ^ e>>>25 ^ e<<26 ^ e<<21 ^ e<<7 ) +  ( g ^ e & (f^g) ) + 0xa2bfe8a1 )|0;
+			d = ( d + h )|0;
+			h = ( h + ( (a & b) ^ ( c & (a ^ b) ) ) + ( a>>>2 ^ a>>>13 ^ a>>>22 ^ a<<30 ^ a<<19 ^ a<<10 ) )|0;
+
+			// 41
+			w9 = ( ( w10>>>7  ^ w10>>>18 ^ w10>>>3  ^ w10<<25 ^ w10<<14 ) + ( w7>>>17 ^ w7>>>19 ^ w7>>>10 ^ w7<<15 ^ w7<<13 ) + w9 + w2 )|0;
+			g = ( w9 + g + ( d>>>6 ^ d>>>11 ^ d>>>25 ^ d<<26 ^ d<<21 ^ d<<7 ) +  ( f ^ d & (e^f) ) + 0xa81a664b )|0;
+			c = ( c + g )|0;
+			g = ( g + ( (h & a) ^ ( b & (h ^ a) ) ) + ( h>>>2 ^ h>>>13 ^ h>>>22 ^ h<<30 ^ h<<19 ^ h<<10 ) )|0;
+
+			// 42
+			w10 = ( ( w11>>>7  ^ w11>>>18 ^ w11>>>3  ^ w11<<25 ^ w11<<14 ) + ( w8>>>17 ^ w8>>>19 ^ w8>>>10 ^ w8<<15 ^ w8<<13 ) + w10 + w3 )|0;
+			f = ( w10 + f + ( c>>>6 ^ c>>>11 ^ c>>>25 ^ c<<26 ^ c<<21 ^ c<<7 ) +  ( e ^ c & (d^e) ) + 0xc24b8b70 )|0;
+			b = ( b + f )|0;
+			f = ( f + ( (g & h) ^ ( a & (g ^ h) ) ) + ( g>>>2 ^ g>>>13 ^ g>>>22 ^ g<<30 ^ g<<19 ^ g<<10 ) )|0;
+
+			// 43
+			w11 = ( ( w12>>>7  ^ w12>>>18 ^ w12>>>3  ^ w12<<25 ^ w12<<14 ) + ( w9>>>17 ^ w9>>>19 ^ w9>>>10 ^ w9<<15 ^ w9<<13 ) + w11 + w4 )|0;
+			e = ( w11 + e + ( b>>>6 ^ b>>>11 ^ b>>>25 ^ b<<26 ^ b<<21 ^ b<<7 ) +  ( d ^ b & (c^d) ) + 0xc76c51a3 )|0;
+			a = ( a + e )|0;
+			e = ( e + ( (f & g) ^ ( h & (f ^ g) ) ) + ( f>>>2 ^ f>>>13 ^ f>>>22 ^ f<<30 ^ f<<19 ^ f<<10 ) )|0;
+
+			// 44
+			w12 = ( ( w13>>>7  ^ w13>>>18 ^ w13>>>3  ^ w13<<25 ^ w13<<14 ) + ( w10>>>17 ^ w10>>>19 ^ w10>>>10 ^ w10<<15 ^ w10<<13 ) + w12 + w5 )|0;
+			d = ( w12 + d + ( a>>>6 ^ a>>>11 ^ a>>>25 ^ a<<26 ^ a<<21 ^ a<<7 ) +  ( c ^ a & (b^c) ) + 0xd192e819 )|0;
+			h = ( h + d )|0;
+			d = ( d + ( (e & f) ^ ( g & (e ^ f) ) ) + ( e>>>2 ^ e>>>13 ^ e>>>22 ^ e<<30 ^ e<<19 ^ e<<10 ) )|0;
+
+			// 45
+			w13 = ( ( w14>>>7  ^ w14>>>18 ^ w14>>>3  ^ w14<<25 ^ w14<<14 ) + ( w11>>>17 ^ w11>>>19 ^ w11>>>10 ^ w11<<15 ^ w11<<13 ) + w13 + w6 )|0;
+			c = ( w13 + c + ( h>>>6 ^ h>>>11 ^ h>>>25 ^ h<<26 ^ h<<21 ^ h<<7 ) +  ( b ^ h & (a^b) ) + 0xd6990624 )|0;
+			g = ( g + c )|0;
+			c = ( c + ( (d & e) ^ ( f & (d ^ e) ) ) + ( d>>>2 ^ d>>>13 ^ d>>>22 ^ d<<30 ^ d<<19 ^ d<<10 ) )|0;
+
+			// 46
+			w14 = ( ( w15>>>7  ^ w15>>>18 ^ w15>>>3  ^ w15<<25 ^ w15<<14 ) + ( w12>>>17 ^ w12>>>19 ^ w12>>>10 ^ w12<<15 ^ w12<<13 ) + w14 + w7 )|0;
+			b = ( w14 + b + ( g>>>6 ^ g>>>11 ^ g>>>25 ^ g<<26 ^ g<<21 ^ g<<7 ) +  ( a ^ g & (h^a) ) + 0xf40e3585 )|0;
+			f = ( f + b )|0;
+			b = ( b + ( (c & d) ^ ( e & (c ^ d) ) ) + ( c>>>2 ^ c>>>13 ^ c>>>22 ^ c<<30 ^ c<<19 ^ c<<10 ) )|0;
+
+			// 47
+			w15 = ( ( w0>>>7  ^ w0>>>18 ^ w0>>>3  ^ w0<<25 ^ w0<<14 ) + ( w13>>>17 ^ w13>>>19 ^ w13>>>10 ^ w13<<15 ^ w13<<13 ) + w15 + w8 )|0;
+			a = ( w15 + a + ( f>>>6 ^ f>>>11 ^ f>>>25 ^ f<<26 ^ f<<21 ^ f<<7 ) +  ( h ^ f & (g^h) ) + 0x106aa070 )|0;
+			e = ( e + a )|0;
+			a = ( a + ( (b & c) ^ ( d & (b ^ c) ) ) + ( b>>>2 ^ b>>>13 ^ b>>>22 ^ b<<30 ^ b<<19 ^ b<<10 ) )|0;
+
+			// 48
+			w0 = ( ( w1>>>7  ^ w1>>>18 ^ w1>>>3  ^ w1<<25 ^ w1<<14 ) + ( w14>>>17 ^ w14>>>19 ^ w14>>>10 ^ w14<<15 ^ w14<<13 ) + w0 + w9 )|0;
+			h = ( w0 + h + ( e>>>6 ^ e>>>11 ^ e>>>25 ^ e<<26 ^ e<<21 ^ e<<7 ) +  ( g ^ e & (f^g) ) + 0x19a4c116 )|0;
+			d = ( d + h )|0;
+			h = ( h + ( (a & b) ^ ( c & (a ^ b) ) ) + ( a>>>2 ^ a>>>13 ^ a>>>22 ^ a<<30 ^ a<<19 ^ a<<10 ) )|0;
+
+			// 49
+			w1 = ( ( w2>>>7  ^ w2>>>18 ^ w2>>>3  ^ w2<<25 ^ w2<<14 ) + ( w15>>>17 ^ w15>>>19 ^ w15>>>10 ^ w15<<15 ^ w15<<13 ) + w1 + w10 )|0;
+			g = ( w1 + g + ( d>>>6 ^ d>>>11 ^ d>>>25 ^ d<<26 ^ d<<21 ^ d<<7 ) +  ( f ^ d & (e^f) ) + 0x1e376c08 )|0;
+			c = ( c + g )|0;
+			g = ( g + ( (h & a) ^ ( b & (h ^ a) ) ) + ( h>>>2 ^ h>>>13 ^ h>>>22 ^ h<<30 ^ h<<19 ^ h<<10 ) )|0;
+
+			// 50
+			w2 = ( ( w3>>>7  ^ w3>>>18 ^ w3>>>3  ^ w3<<25 ^ w3<<14 ) + ( w0>>>17 ^ w0>>>19 ^ w0>>>10 ^ w0<<15 ^ w0<<13 ) + w2 + w11 )|0;
+			f = ( w2 + f + ( c>>>6 ^ c>>>11 ^ c>>>25 ^ c<<26 ^ c<<21 ^ c<<7 ) +  ( e ^ c & (d^e) ) + 0x2748774c )|0;
+			b = ( b + f )|0;
+			f = ( f + ( (g & h) ^ ( a & (g ^ h) ) ) + ( g>>>2 ^ g>>>13 ^ g>>>22 ^ g<<30 ^ g<<19 ^ g<<10 ) )|0;
+
+			// 51
+			w3 = ( ( w4>>>7  ^ w4>>>18 ^ w4>>>3  ^ w4<<25 ^ w4<<14 ) + ( w1>>>17 ^ w1>>>19 ^ w1>>>10 ^ w1<<15 ^ w1<<13 ) + w3 + w12 )|0;
+			e = ( w3 + e + ( b>>>6 ^ b>>>11 ^ b>>>25 ^ b<<26 ^ b<<21 ^ b<<7 ) +  ( d ^ b & (c^d) ) + 0x34b0bcb5 )|0;
+			a = ( a + e )|0;
+			e = ( e + ( (f & g) ^ ( h & (f ^ g) ) ) + ( f>>>2 ^ f>>>13 ^ f>>>22 ^ f<<30 ^ f<<19 ^ f<<10 ) )|0;
+
+			// 52
+			w4 = ( ( w5>>>7  ^ w5>>>18 ^ w5>>>3  ^ w5<<25 ^ w5<<14 ) + ( w2>>>17 ^ w2>>>19 ^ w2>>>10 ^ w2<<15 ^ w2<<13 ) + w4 + w13 )|0;
+			d = ( w4 + d + ( a>>>6 ^ a>>>11 ^ a>>>25 ^ a<<26 ^ a<<21 ^ a<<7 ) +  ( c ^ a & (b^c) ) + 0x391c0cb3 )|0;
+			h = ( h + d )|0;
+			d = ( d + ( (e & f) ^ ( g & (e ^ f) ) ) + ( e>>>2 ^ e>>>13 ^ e>>>22 ^ e<<30 ^ e<<19 ^ e<<10 ) )|0;
+
+			// 53
+			w5 = ( ( w6>>>7  ^ w6>>>18 ^ w6>>>3  ^ w6<<25 ^ w6<<14 ) + ( w3>>>17 ^ w3>>>19 ^ w3>>>10 ^ w3<<15 ^ w3<<13 ) + w5 + w14 )|0;
+			c = ( w5 + c + ( h>>>6 ^ h>>>11 ^ h>>>25 ^ h<<26 ^ h<<21 ^ h<<7 ) +  ( b ^ h & (a^b) ) + 0x4ed8aa4a )|0;
+			g = ( g + c )|0;
+			c = ( c + ( (d & e) ^ ( f & (d ^ e) ) ) + ( d>>>2 ^ d>>>13 ^ d>>>22 ^ d<<30 ^ d<<19 ^ d<<10 ) )|0;
+
+			// 54
+			w6 = ( ( w7>>>7  ^ w7>>>18 ^ w7>>>3  ^ w7<<25 ^ w7<<14 ) + ( w4>>>17 ^ w4>>>19 ^ w4>>>10 ^ w4<<15 ^ w4<<13 ) + w6 + w15 )|0;
+			b = ( w6 + b + ( g>>>6 ^ g>>>11 ^ g>>>25 ^ g<<26 ^ g<<21 ^ g<<7 ) +  ( a ^ g & (h^a) ) + 0x5b9cca4f )|0;
+			f = ( f + b )|0;
+			b = ( b + ( (c & d) ^ ( e & (c ^ d) ) ) + ( c>>>2 ^ c>>>13 ^ c>>>22 ^ c<<30 ^ c<<19 ^ c<<10 ) )|0;
+
+			// 55
+			w7 = ( ( w8>>>7  ^ w8>>>18 ^ w8>>>3  ^ w8<<25 ^ w8<<14 ) + ( w5>>>17 ^ w5>>>19 ^ w5>>>10 ^ w5<<15 ^ w5<<13 ) + w7 + w0 )|0;
+			a = ( w7 + a + ( f>>>6 ^ f>>>11 ^ f>>>25 ^ f<<26 ^ f<<21 ^ f<<7 ) +  ( h ^ f & (g^h) ) + 0x682e6ff3 )|0;
+			e = ( e + a )|0;
+			a = ( a + ( (b & c) ^ ( d & (b ^ c) ) ) + ( b>>>2 ^ b>>>13 ^ b>>>22 ^ b<<30 ^ b<<19 ^ b<<10 ) )|0;
+
+			// 56
+			w8 = ( ( w9>>>7  ^ w9>>>18 ^ w9>>>3  ^ w9<<25 ^ w9<<14 ) + ( w6>>>17 ^ w6>>>19 ^ w6>>>10 ^ w6<<15 ^ w6<<13 ) + w8 + w1 )|0;
+			h = ( w8 + h + ( e>>>6 ^ e>>>11 ^ e>>>25 ^ e<<26 ^ e<<21 ^ e<<7 ) +  ( g ^ e & (f^g) ) + 0x748f82ee )|0;
+			d = ( d + h )|0;
+			h = ( h + ( (a & b) ^ ( c & (a ^ b) ) ) + ( a>>>2 ^ a>>>13 ^ a>>>22 ^ a<<30 ^ a<<19 ^ a<<10 ) )|0;
+
+			// 57
+			w9 = ( ( w10>>>7  ^ w10>>>18 ^ w10>>>3  ^ w10<<25 ^ w10<<14 ) + ( w7>>>17 ^ w7>>>19 ^ w7>>>10 ^ w7<<15 ^ w7<<13 ) + w9 + w2 )|0;
+			g = ( w9 + g + ( d>>>6 ^ d>>>11 ^ d>>>25 ^ d<<26 ^ d<<21 ^ d<<7 ) +  ( f ^ d & (e^f) ) + 0x78a5636f )|0;
+			c = ( c + g )|0;
+			g = ( g + ( (h & a) ^ ( b & (h ^ a) ) ) + ( h>>>2 ^ h>>>13 ^ h>>>22 ^ h<<30 ^ h<<19 ^ h<<10 ) )|0;
+
+			// 58
+			w10 = ( ( w11>>>7  ^ w11>>>18 ^ w11>>>3  ^ w11<<25 ^ w11<<14 ) + ( w8>>>17 ^ w8>>>19 ^ w8>>>10 ^ w8<<15 ^ w8<<13 ) + w10 + w3 )|0;
+			f = ( w10 + f + ( c>>>6 ^ c>>>11 ^ c>>>25 ^ c<<26 ^ c<<21 ^ c<<7 ) +  ( e ^ c & (d^e) ) + 0x84c87814 )|0;
+			b = ( b + f )|0;
+			f = ( f + ( (g & h) ^ ( a & (g ^ h) ) ) + ( g>>>2 ^ g>>>13 ^ g>>>22 ^ g<<30 ^ g<<19 ^ g<<10 ) )|0;
+
+			// 59
+			w11 = ( ( w12>>>7  ^ w12>>>18 ^ w12>>>3  ^ w12<<25 ^ w12<<14 ) + ( w9>>>17 ^ w9>>>19 ^ w9>>>10 ^ w9<<15 ^ w9<<13 ) + w11 + w4 )|0;
+			e = ( w11 + e + ( b>>>6 ^ b>>>11 ^ b>>>25 ^ b<<26 ^ b<<21 ^ b<<7 ) +  ( d ^ b & (c^d) ) + 0x8cc70208 )|0;
+			a = ( a + e )|0;
+			e = ( e + ( (f & g) ^ ( h & (f ^ g) ) ) + ( f>>>2 ^ f>>>13 ^ f>>>22 ^ f<<30 ^ f<<19 ^ f<<10 ) )|0;
+
+			// 60
+			w12 = ( ( w13>>>7  ^ w13>>>18 ^ w13>>>3  ^ w13<<25 ^ w13<<14 ) + ( w10>>>17 ^ w10>>>19 ^ w10>>>10 ^ w10<<15 ^ w10<<13 ) + w12 + w5 )|0;
+			d = ( w12 + d + ( a>>>6 ^ a>>>11 ^ a>>>25 ^ a<<26 ^ a<<21 ^ a<<7 ) +  ( c ^ a & (b^c) ) + 0x90befffa )|0;
+			h = ( h + d )|0;
+			d = ( d + ( (e & f) ^ ( g & (e ^ f) ) ) + ( e>>>2 ^ e>>>13 ^ e>>>22 ^ e<<30 ^ e<<19 ^ e<<10 ) )|0;
+
+			// 61
+			w13 = ( ( w14>>>7  ^ w14>>>18 ^ w14>>>3  ^ w14<<25 ^ w14<<14 ) + ( w11>>>17 ^ w11>>>19 ^ w11>>>10 ^ w11<<15 ^ w11<<13 ) + w13 + w6 )|0;
+			c = ( w13 + c + ( h>>>6 ^ h>>>11 ^ h>>>25 ^ h<<26 ^ h<<21 ^ h<<7 ) +  ( b ^ h & (a^b) ) + 0xa4506ceb )|0;
+			g = ( g + c )|0;
+			c = ( c + ( (d & e) ^ ( f & (d ^ e) ) ) + ( d>>>2 ^ d>>>13 ^ d>>>22 ^ d<<30 ^ d<<19 ^ d<<10 ) )|0;
+
+			// 62
+			w14 = ( ( w15>>>7  ^ w15>>>18 ^ w15>>>3  ^ w15<<25 ^ w15<<14 ) + ( w12>>>17 ^ w12>>>19 ^ w12>>>10 ^ w12<<15 ^ w12<<13 ) + w14 + w7 )|0;
+			b = ( w14 + b + ( g>>>6 ^ g>>>11 ^ g>>>25 ^ g<<26 ^ g<<21 ^ g<<7 ) +  ( a ^ g & (h^a) ) + 0xbef9a3f7 )|0;
+			f = ( f + b )|0;
+			b = ( b + ( (c & d) ^ ( e & (c ^ d) ) ) + ( c>>>2 ^ c>>>13 ^ c>>>22 ^ c<<30 ^ c<<19 ^ c<<10 ) )|0;
+
+			// 63
+			w15 = ( ( w0>>>7  ^ w0>>>18 ^ w0>>>3  ^ w0<<25 ^ w0<<14 ) + ( w13>>>17 ^ w13>>>19 ^ w13>>>10 ^ w13<<15 ^ w13<<13 ) + w15 + w8 )|0;
+			a = ( w15 + a + ( f>>>6 ^ f>>>11 ^ f>>>25 ^ f<<26 ^ f<<21 ^ f<<7 ) +  ( h ^ f & (g^h) ) + 0xc67178f2 )|0;
+			e = ( e + a )|0;
+			a = ( a + ( (b & c) ^ ( d & (b ^ c) ) ) + ( b>>>2 ^ b>>>13 ^ b>>>22 ^ b<<30 ^ b<<19 ^ b<<10 ) )|0;
+
+			H0 = ( H0 + a )|0;
+			H1 = ( H1 + b )|0;
+			H2 = ( H2 + c )|0;
+			H3 = ( H3 + d )|0;
+			H4 = ( H4 + e )|0;
+			H5 = ( H5 + f )|0;
+			H6 = ( H6 + g )|0;
+			H7 = ( H7 + h )|0;
+		}
+
+		/**
+		 * Sets the HMAC key's inner and outer pad states.
+		 */
+		function setPads(i0, i1, i2, i3, i4, i5, i6, i7, o0, o1, o2, o3, o4, o5, o6, o7)
+		{
+			i0 = i0 | 0;
+			i1 = i1 | 0;
+			i2 = i2 | 0;
+			i3 = i3 | 0;
+			i4 = i4 | 0;
+			i5 = i5 | 0;
+			i6 = i6 | 0;
+			i7 = i7 | 0;
+			o0 = o0 | 0;
+			o1 = o1 | 0;
+			o2 = o2 | 0;
+			o3 = o3 | 0;
+			o4 = o4 | 0;
+			o5 = o5 | 0;
+			o6 = o6 | 0;
+			o7 = o7 | 0;
+
+			I0 = i0; I1 = i1; I2 = i2; I3 = i3; I4 = i4; I5 = i5; I6 = i6; I7 = i7;
+			O0 = o0; O1 = o1; O2 = o2; O3 = o3; O4 = o4; O5 = o5; O6 = o6; O7 = o7;
+		}
+
+		/**
+		 * Starts a block with its first iteration's output, U1.
+		 */
+		function setFirst(u0, u1, u2, u3, u4, u5, u6, u7)
+		{
+			u0 = u0 | 0;
+			u1 = u1 | 0;
+			u2 = u2 | 0;
+			u3 = u3 | 0;
+			u4 = u4 | 0;
+			u5 = u5 | 0;
+			u6 = u6 | 0;
+			u7 = u7 | 0;
+
+			U0 = u0; U1 = u1; U2 = u2; U3 = u3; U4 = u4; U5 = u5; U6 = u6; U7 = u7;
+			X0 = u0; X1 = u1; X2 = u2; X3 = u3; X4 = u4; X5 = u5; X6 = u6; X7 = u7;
+		}
+
+		/**
+		 * Performs count more iterations: U = HMAC(password, U), X = X xor U.  Each HMAC is two compressions of one block, because U is 32 bytes.
+		 */
+		function iterate(count)
+		{
+			count = count | 0;
+
+			var t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0, t5 = 0, t6 = 0, t7 = 0,
+				x0 = 0, x1 = 0, x2 = 0, x3 = 0, x4 = 0, x5 = 0, x6 = 0, x7 = 0;
+
+			t0 = U0; t1 = U1; t2 = U2; t3 = U3; t4 = U4; t5 = U5; t6 = U6; t7 = U7;
+			x0 = X0; x1 = X1; x2 = X2; x3 = X3; x4 = X4; x5 = X5; x6 = X6; x7 = X7;
+
+			while ((count | 0) > 0)
+			{
+				H0 = I0; H1 = I1; H2 = I2; H3 = I3; H4 = I4; H5 = I5; H6 = I6; H7 = I7;
+				_core(t0, t1, t2, t3, t4, t5, t6, t7, 0x80000000, 0, 0, 0, 0, 0, 0, 768);
+				t0 = H0; t1 = H1; t2 = H2; t3 = H3; t4 = H4; t5 = H5; t6 = H6; t7 = H7;
+
+				H0 = O0; H1 = O1; H2 = O2; H3 = O3; H4 = O4; H5 = O5; H6 = O6; H7 = O7;
+				_core(t0, t1, t2, t3, t4, t5, t6, t7, 0x80000000, 0, 0, 0, 0, 0, 0, 768);
+				t0 = H0; t1 = H1; t2 = H2; t3 = H3; t4 = H4; t5 = H5; t6 = H6; t7 = H7;
+
+				x0 = x0 ^ t0;
+				x1 = x1 ^ t1;
+				x2 = x2 ^ t2;
+				x3 = x3 ^ t3;
+				x4 = x4 ^ t4;
+				x5 = x5 ^ t5;
+				x6 = x6 ^ t6;
+				x7 = x7 ^ t7;
+
+				count = count - 1 | 0;
+			}
+
+			U0 = t0; U1 = t1; U2 = t2; U3 = t3; U4 = t4; U5 = t5; U6 = t6; U7 = t7;
+			X0 = x0; X1 = x1; X2 = x2; X3 = x3; X4 = x4; X5 = x5; X6 = x6; X7 = x7;
+		}
+
+		/**
+		 * Returns word i (0 to 7) of the block's output so far, the XOR of every U.
+		 */
+		function result(i)
+		{
+			i = i | 0;
+
+			switch (i | 0)
+			{
+				case 0:
+					return X0 | 0;
+				case 1:
+					return X1 | 0;
+				case 2:
+					return X2 | 0;
+				case 3:
+					return X3 | 0;
+				case 4:
+					return X4 | 0;
+				case 5:
+					return X5 | 0;
+				case 6:
+					return X6 | 0;
+				case 7:
+					return X7 | 0;
+			}
+			return 0;
+		}
+
+		return {
+			setPads: setPads,
+			setFirst: setFirst,
+			iterate: iterate,
+			result: result
+		};
+	}
 	// #endregion
 
 	// #region AES-256 (encryption only) and GCM
@@ -1154,7 +1718,7 @@
 			setTimeout(function () { done(err || new Error("Native crypto failed.")); }, 0);
 		});
 	}
-	function nativePbkdf2(passwordBytes, done)
+	function nativePbkdf2(passwordBytes, iterations, done)
 	{
 		var s = nativeSubtle();
 		if (!s)
@@ -1166,7 +1730,7 @@
 		{
 			settleOutsidePromise(s.importKey("raw", toUint8Array(passwordBytes), { name: "PBKDF2" }, false, ["deriveBits"]).then(function (baseKey)
 			{
-				return s.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: toUint8Array(utf8Encode(SALT)), iterations: PBKDF2_ITERATIONS }, baseKey, 512);
+				return s.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: toUint8Array(utf8Encode(SALT)), iterations: iterations }, baseKey, 512);
 			}), done);
 		}
 		catch (e)
@@ -1202,10 +1766,28 @@
 	{
 		return { lookupKey: base32Encode(material.slice(0, 20)), contentKey: material.slice(32, 64) };
 	}
-	function deriveKeysInternal(phrase, onProgress, done)
+	/**
+	 * Returns the PBKDF2 iteration count for a key derivation mode ("standard" if omitted), or 0 if the mode is unknown.
+	 */
+	function pbkdf2Iterations(mode)
 	{
+		mode = mode || "standard";
+		return Object.prototype.hasOwnProperty.call(PBKDF2_ITERATIONS, mode) ? PBKDF2_ITERATIONS[mode] : 0;
+	}
+	function unknownModeError(mode)
+	{
+		return makeError("invalid_argument", "Unknown key derivation mode \"" + mode + "\".  Use \"standard\" or \"fast\".");
+	}
+	function deriveKeysInternal(phrase, mode, onProgress, done)
+	{
+		var iterations = pbkdf2Iterations(mode);
+		if (!iterations)
+		{
+			done(unknownModeError(mode));
+			return;
+		}
 		var password = utf8Encode(KVStoreClientLegacy.normalizePhrase(phrase));
-		nativePbkdf2(password, function (err, material)
+		nativePbkdf2(password, iterations, function (err, material)
 		{
 			if (!err)
 			{
@@ -1213,7 +1795,7 @@
 				done(null, keysFromMaterial(material));
 				return;
 			}
-			runJob(function () { return new Pbkdf2Job(password, utf8Encode(SALT), PBKDF2_ITERATIONS, 64); }, onProgress, function (err2, material2)
+			runJob(function () { return new Pbkdf2Job(password, utf8Encode(SALT), iterations, 64); }, onProgress, function (err2, material2)
 			{
 				if (err2)
 				{
@@ -1229,12 +1811,12 @@
 	{
 		return !!obj && typeof obj === "object" && typeof obj.lookupKey === "string" && !!obj.contentKey && obj.contentKey.length === 32;
 	}
-	function withKeys(phraseOrKeys, onProgress, done)
+	function withKeys(phraseOrKeys, mode, onProgress, done)
 	{
 		if (isKeys(phraseOrKeys))
 			done(null, phraseOrKeys);
 		else
-			deriveKeysInternal(phraseOrKeys, onProgress, done);
+			deriveKeysInternal(phraseOrKeys, mode, onProgress, done);
 	}
 	function contentKeyError(key)
 	{
@@ -1495,12 +2077,16 @@
 	 * @param {Object} [options]
 	 * @param {string} [options.bucket] Bucket to use.  If omitted, the server's default bucket is used.
 	 * @param {number} [options.timeout] Request timeout in milliseconds.  If omitted or 0, requests have no timeout.
+	 * @param {string} [options.keyDerivation] "standard" (the default, 600,000 PBKDF2 iterations) or "fast" (10,000).  Used by putEncrypted, getEncrypted, and getEncryptedText.
 	 */
 	function KVStoreClientLegacy(baseUrl, options)
 	{
 		this.baseUrl = String(baseUrl).replace(/\/+$/, "");
 		this.bucket = options && options.bucket ? options.bucket : undefined;
 		this.timeout = options && options.timeout > 0 ? options.timeout : 0;
+		this.keyDerivation = options && options.keyDerivation ? options.keyDerivation : "standard";
+		if (!pbkdf2Iterations(this.keyDerivation))
+			throw unknownModeError(this.keyDerivation);
 	}
 	/**
 	 * POSTs a JSON body to an API endpoint, as text/plain (a CORS-safelisted content type, so no preflight request is needed).
@@ -1667,7 +2253,7 @@
 		return invoke(callback, function (done)
 		{
 			var bytes = toBytes(data);
-			withKeys(phrase, onProgress, function (err, keys)
+			withKeys(phrase, self.keyDerivation, onProgress, function (err, keys)
 			{
 				if (err)
 				{
@@ -1695,7 +2281,7 @@
 		var self = this;
 		return invoke(callback, function (done)
 		{
-			withKeys(phrase, onProgress, function (err, keys)
+			withKeys(phrase, self.keyDerivation, onProgress, function (err, keys)
 			{
 				if (err)
 				{
@@ -1790,14 +2376,15 @@
 		return chosen.join("-");
 	};
 	/**
-	 * Derives the lookup key and content key from a phrase.  This is deliberately slow (600,000 PBKDF2 iterations), and in pure JavaScript much slower than natively.
+	 * Derives the lookup key and content key from a phrase.  This is deliberately slow (600,000 PBKDF2 iterations, or 10,000 in "fast" mode), and in pure JavaScript slower than natively.
 	 * @param {string} phrase The secret phrase.  It is normalized first.
 	 * @param {function(Error, {lookupKey: string, contentKey: number[]})} [callback] If omitted (or null), a Promise is returned.
 	 * @param {function(number)} [onProgress] Receives progress, from 0 to 1.
+	 * @param {string} [mode] "standard" (the default) or "fast".  Data written with one mode can only be read with the same mode.
 	 */
-	KVStoreClientLegacy.deriveKeys = function (phrase, callback, onProgress)
+	KVStoreClientLegacy.deriveKeys = function (phrase, callback, onProgress, mode)
 	{
-		return invoke(callback, function (done) { deriveKeysInternal(phrase, onProgress, done); });
+		return invoke(callback, function (done) { deriveKeysInternal(phrase, mode, onProgress, done); });
 	};
 	/**
 	 * Encrypts with AES-256-GCM.  The result is the 12-byte IV followed by the ciphertext and the 16-byte authentication tag.

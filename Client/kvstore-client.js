@@ -5,7 +5,7 @@
  * one secret word phrase is derived into two keys, a lookup key (sent to the server) and a content key (never transmitted).
  *
  *   phrase     = 6 words from the EFF short wordlist #1                (~62 bits)
- *   material   = PBKDF2-SHA256(phrase, salt="bp2008-kv-v1", iterations=600000, dkLen=64)
+ *   material   = PBKDF2-SHA256(phrase, salt="bp2008-kv-v1", iterations=600000, dkLen=64)    (10000 iterations in "fast" mode)
  *   lookupKey  = base32(material[0..20])  -> 32 chars, sent to the server
  *   contentKey = material[32..64]         -> AES-256-GCM key, never transmitted
  *
@@ -17,6 +17,11 @@
  *   await kv.putEncrypted(phrase, "some settings JSON"); // device A
  *   const text = await kv.getEncryptedText(phrase);     // device B
  *
+ * Key derivation modes.  "standard" (the default) uses 600,000 PBKDF2 iterations.  "fast" uses 10,000, so it is 60 times faster, which
+ * matters most for kvstore-client-legacy.js in old browsers.  It is also 60 times cheaper for anyone trying to guess a phrase offline
+ * (for example from lookup keys on the server's disk), so use it only with randomly generated phrases of at least 6 words.  The modes
+ * derive different keys, so every device must use the same mode: new KVStoreClient(url, { keyDerivation: "fast" }).
+ *
  * Requires a secure context (https or localhost) for WebCrypto.
  */
 (function (root)
@@ -24,8 +29,21 @@
 	"use strict";
 
 	var SALT = "bp2008-kv-v1";
-	var PBKDF2_ITERATIONS = 600000;
+	var PBKDF2_ITERATIONS = { standard: 600000, fast: 10000 };
 	var BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
+
+	/**
+	 * Returns the PBKDF2 iteration count for a key derivation mode ("standard" if omitted), or 0 if the mode is unknown.
+	 */
+	function pbkdf2Iterations(mode)
+	{
+		mode = mode || "standard";
+		return Object.prototype.hasOwnProperty.call(PBKDF2_ITERATIONS, mode) ? PBKDF2_ITERATIONS[mode] : 0;
+	}
+	function unknownModeMessage(mode)
+	{
+		return "Unknown key derivation mode \"" + mode + "\".  Use \"standard\" or \"fast\".";
+	}
 
 	/**
 	 * An error returned by the KVStore server.
@@ -50,11 +68,15 @@
 	 * @param {string} baseUrl Base URL of the KVStore server, e.g. "https://kv.example.com".
 	 * @param {Object} [options]
 	 * @param {string} [options.bucket] Bucket to use.  If omitted, the server's default bucket is used.
+	 * @param {string} [options.keyDerivation] "standard" (the default, 600,000 PBKDF2 iterations) or "fast" (10,000).  Used by putEncrypted, getEncrypted, and getEncryptedText.
 	 */
 	function KVStoreClient(baseUrl, options)
 	{
 		this.baseUrl = String(baseUrl).replace(/\/+$/, "");
 		this.bucket = options && options.bucket ? options.bucket : undefined;
+		this.keyDerivation = options && options.keyDerivation ? options.keyDerivation : "standard";
+		if (!pbkdf2Iterations(this.keyDerivation))
+			throw new Error(unknownModeMessage(this.keyDerivation));
 	}
 
 	/**
@@ -179,7 +201,7 @@
 	{
 		var self = this;
 		var bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-		return KVStoreClient.deriveKeys(phrase).then(function (keys)
+		return KVStoreClient.deriveKeys(phrase, this.keyDerivation).then(function (keys)
 		{
 			return KVStoreClient.encrypt(keys.contentKey, bytes).then(function (ciphertext)
 			{
@@ -195,7 +217,7 @@
 	KVStoreClient.prototype.getEncrypted = function (phrase)
 	{
 		var self = this;
-		return KVStoreClient.deriveKeys(phrase).then(function (keys)
+		return KVStoreClient.deriveKeys(phrase, this.keyDerivation).then(function (keys)
 		{
 			return self.getRaw(keys.lookupKey).then(function (ciphertext)
 			{
@@ -246,16 +268,20 @@
 		return chosen.join("-");
 	};
 	/**
-	 * Derives the lookup key and content key from a phrase.  This is deliberately slow (600,000 PBKDF2 iterations).
+	 * Derives the lookup key and content key from a phrase.  This is deliberately slow (600,000 PBKDF2 iterations, or 10,000 in "fast" mode).
 	 * @param {string} phrase The secret phrase.  It is normalized first.
+	 * @param {string} [mode] "standard" (the default) or "fast".  Data written with one mode can only be read with the same mode.
 	 * @returns {Promise<{lookupKey: string, contentKey: CryptoKey}>}
 	 */
-	KVStoreClient.deriveKeys = function (phrase)
+	KVStoreClient.deriveKeys = function (phrase, mode)
 	{
 		var enc = new TextEncoder();
+		var iterations = pbkdf2Iterations(mode);
+		if (!iterations)
+			return Promise.reject(new Error(unknownModeMessage(mode)));
 		return crypto.subtle.importKey("raw", enc.encode(KVStoreClient.normalizePhrase(phrase)), "PBKDF2", false, ["deriveBits"]).then(function (baseKey)
 		{
-			return crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: enc.encode(SALT), iterations: PBKDF2_ITERATIONS }, baseKey, 512);
+			return crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: enc.encode(SALT), iterations: iterations }, baseKey, 512);
 		}).then(function (bits)
 		{
 			var material = new Uint8Array(bits);

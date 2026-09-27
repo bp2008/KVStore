@@ -104,7 +104,7 @@ The server can't enforce encryption and doesn't try.  The recommended convention
 
 ```
 phrase     = 6 words from the EFF short wordlist #1          (~62 bits)
-material   = PBKDF2-SHA256(phrase, salt="bp2008-kv-v1", iterations=600000, dkLen=64)
+material   = PBKDF2-SHA256(phrase, salt="bp2008-kv-v1", iterations=600000, dkLen=64)    (10000 iterations in "fast" mode)
 lookupKey  = base32(material[0..20])   -> 32 chars, sent to the server
 contentKey = material[32..64]          -> AES-256-GCM key, never transmitted
 ```
@@ -118,7 +118,9 @@ await kv.putEncrypted(phrase, JSON.stringify(settings)); // device A
 const json = await kv.getEncryptedText(phrase);        // device B
 ```
 
-For pages served over plain http (where browsers withhold the WebCrypto API that the reference client needs) or old browsers down to Internet Explorer 9, use [`Client/kvstore-client-legacy.js`](Client/kvstore-client-legacy.js) instead.  It implements the same convention in dependency-free ES5 with callbacks, so either client can read what the other stores, but its pure-JavaScript key derivation is much slower, and in IE8/9 cross-origin requests go through `XDomainRequest`, which hides server error details and requires the page and the API to use the same scheme.
+**Fast mode.**  `new KVStoreClient(url, { keyDerivation: "fast" })` uses 10,000 PBKDF2 iterations instead of 600,000, so key derivation is 60 times faster, which matters most for the legacy client in old browsers.  Each guess also becomes 60 times cheaper for anyone attacking a phrase offline, such as someone with a copy of the server's disk testing guesses against the lookup keys.  For a randomly generated phrase of 6 or more words (about 62 bits or more), that is still impractical, so use fast mode only with generated phrases of at least 6 words, never with phrases people choose themselves.  The two modes derive different keys, so every device that shares a phrase must use the same mode.
+
+For pages served over plain http (where browsers withhold the WebCrypto API that the reference client needs) or old browsers down to Internet Explorer 9, use [`Client/kvstore-client-legacy.js`](Client/kvstore-client-legacy.js) instead.  It implements the same convention in dependency-free ES5 with callbacks, so either client can read what the other stores, but its pure-JavaScript key derivation is several times slower than native, and in IE8/9 cross-origin requests go through `XDomainRequest`, which hides server error details and requires the page and the API to use the same scheme.
 
 Encryption protects stored data from anyone with access to the server's disk who lacks the phrase.  It adds no resistance to guessing the phrase: brute-force resistance comes from the phrase length and the rate limits.  Six words is the recommended minimum.
 
