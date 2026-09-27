@@ -44,11 +44,18 @@ code { background: var(--code); border-radius: 4px; padding: 1px 4px; overflow-w
 pre { background: var(--code); border-radius: 6px; padding: 10px 12px; overflow-x: auto; margin: 0.6em 0; }
 pre code { background: none; padding: 0; }
 
-/* Top bar */
-.topbar { background: var(--panel); border-bottom: 1px solid var(--border); }
-.topbar-inner { max-width: 880px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 8px 20px; flex-wrap: wrap; }
-.brand { font-weight: 650; color: var(--fg); text-decoration: none; font-size: 1.05em; }
-.topbar nav { display: flex; gap: 4px 14px; flex-wrap: wrap; font-size: 0.95em; }
+/* Top bar (sticky, so in-page links are offset by its height) */
+html { scroll-padding-top: 4.5rem; }
+.topbar { background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
+.topbar-inner { max-width: 880px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 20px; }
+.brand { flex: none; font-weight: 650; color: var(--fg); text-decoration: none; font-size: 1.05em; }
+/* One row at every width, so the sticky bar stays short on phones; links that don't fit scroll sideways. */
+.topbar nav { display: flex; gap: 14px; min-width: 0; overflow-x: auto; white-space: nowrap; scrollbar-width: none; font-size: 0.95em; }
+.topbar nav::-webkit-scrollbar { display: none; }
+@media (max-width: 520px) {
+	/* The links overflow at this width; fade the edge to show that they scroll. */
+	.topbar nav { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); padding-right: 20px; }
+}
 .topbar nav a { color: var(--muted); text-decoration: none; }
 .topbar nav a:hover, .topbar nav a[aria-current] { color: var(--fg); text-decoration: underline; }
 
@@ -59,6 +66,7 @@ h2 { font-size: 1.3em; margin: 2.2em 0 0.5em; padding-top: 0.6em; border-top: 1p
 h3 { font-size: 1.1em; margin: 1.8em 0 0.4em; }
 h4 { font-size: 0.95em; margin: 1.1em 0 0.3em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
 p.lead { color: var(--muted); margin-top: 0; font-size: 1.08em; }
+p.toc { font-size: 0.95em; color: var(--muted); }
 .muted { color: var(--muted); }
 .small { font-size: 0.9em; }
 ol li, ul li { margin: 0.3em 0; }

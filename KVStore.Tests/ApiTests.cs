@@ -515,15 +515,21 @@ namespace KVStore.Tests
 				Assert.IsFalse(landing.Text.Contains("{{"), "Every placeholder in the landing page template is filled in");
 				Assert.IsFalse(landing.Text.Contains("mailto:"), "No contact information is published");
 				Assert.IsTrue(landing.Text.Contains("href=\"takedown\""));
-				Assert.IsTrue(landing.Text.Contains("href=\"api-tester\""));
-				Assert.IsTrue(landing.Text.Contains("5 MiB in the default bucket"), "Limits come from the settings");
+				Assert.IsTrue(landing.Text.Contains("href=\"api\""));
+				Assert.IsTrue(landing.Text.Contains("at most 2 hours after it was stored"), "Limits come from the settings");
+				ApiResult apiDocs = await ts.Send(new HttpRequestMessage(HttpMethod.Get, "api"));
+				Assert.AreEqual(200, apiDocs.Status);
+				Assert.IsFalse(apiDocs.Text.Contains("{{"), "Every placeholder in the API documentation is filled in");
+				Assert.IsTrue(apiDocs.Text.Contains("5 MiB in the default bucket"), "Limits come from the settings");
+				Assert.IsTrue(apiDocs.Text.Contains("10 requests at once, then 60 more per hour"));
+				Assert.IsTrue(apiDocs.Text.Contains("10 MiB at once, then 60 MiB more per hour"));
 				ts.UpdateSettings(s => s.operatorName = "Example <Operator>");
 				landing = await ts.Send(new HttpRequestMessage(HttpMethod.Get, ""));
 				Assert.IsTrue(landing.Text.Contains("offered by Example &lt;Operator&gt;."), "Settings are HTML-encoded");
 				Assert.IsTrue(landing.Headers["Content-Security-Policy"].Contains("script-src 'self'"));
 
 				// The other public pages and their files.
-				foreach (string path in new string[] { "api-tester", "takedown", "site.css", "site.js", "api-tester.js", "takedown.js" })
+				foreach (string path in new string[] { "api", "api-tester", "takedown", "site.css", "site.js", "api-tester.js", "takedown.js" })
 				{
 					ApiResult r = await ts.Send(new HttpRequestMessage(HttpMethod.Get, path));
 					Assert.AreEqual(200, r.Status, path);
@@ -533,6 +539,7 @@ namespace KVStore.Tests
 				Assert.IsTrue((await ts.Send(new HttpRequestMessage(HttpMethod.Get, "takedown"))).Text.Contains("takedown.js"));
 				// The landing page template is only served filled in, at "/".
 				Assert.AreEqual(404, (await ts.Send(new HttpRequestMessage(HttpMethod.Get, "index"))).Status);
+				Assert.AreEqual(404, (await ts.Send(new HttpRequestMessage(HttpMethod.Get, "api.html"))).Status, "Pages are served by name only");
 				ApiResult robots = await ts.Send(new HttpRequestMessage(HttpMethod.Get, "robots.txt"));
 				Assert.AreEqual(200, robots.Status);
 				Assert.IsTrue(robots.Text.Contains("Disallow: /"));

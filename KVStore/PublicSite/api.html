@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>API documentation - KVStore</title>
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<header class="topbar">
+	<div class="topbar-inner">
+		<a class="brand" href="./">KVStore</a>
+		<nav>
+			<a href="api" aria-current="page">API docs</a>
+			<a href="api-tester">API tester</a>
+			<a href="./#terms">Terms</a>
+			<a href="takedown">Report &amp; remove content</a>
+		</nav>
+	</div>
+</header>
+<main>
+<h1>API documentation</h1>
+<p class="lead">Every operation is an HTTP request to <code>/v1/&lt;operation&gt;</code> on this server.  You can try each one from your browser with the <a href="api-tester">API tester</a>.</p>
+<p class="toc">On this page: <a href="#basics">Basics</a> &middot; <a href="#operations">Operations</a> &middot; <a href="#errors">Errors</a> &middot; <a href="#limits">Rate limits</a></p>
+
+<h2 id="basics">Basics</h2>
+<ul>
+<li><strong>Method.</strong>  Every key/value operation is a <code>POST</code> request.  Only <code>health</code> uses <code>GET</code>.  There is no way to download a value by following a link.</li>
+<li><strong>Request body.</strong>  A JSON object, except for <code>putraw</code>, whose body is the value itself and whose other fields are URL parameters.  Browsers should send <code>Content-Type: text/plain;charset=UTF-8</code>, which avoids a CORS preflight request; the server reads the body as JSON whatever its declared type.  Members not listed for an operation are ignored.  Nested objects, arrays, and duplicate members are rejected.</li>
+<li><strong>Response body.</strong>  A JSON object with <code>"ok": true</code> on success, or <code>"ok": false</code> and an <a href="#errors"><code>"error"</code> code</a> on failure.  The exception is a successful <code>getraw</code>, whose body is the value itself.</li>
+<li><strong>Keys.</strong>  Exactly 32 characters from the base32 alphabet (<code>a</code>&ndash;<code>z</code> and <code>2</code>&ndash;<code>7</code>), not case-sensitive.  Generate keys randomly (32 random base32 characters is 160 bits), because anyone who guesses a key has full control of its value.  {{keyFormatNote}}</li>
+<li><strong>Buckets.</strong>  Named storage areas with their own limits, created by the operator.  Names are 1&ndash;32 characters from the same base32 alphabet, not case-sensitive.  When a request does not name a bucket, the default bucket (<code>{{defaultBucket}}</code>) is used.  The <a href="#op-buckets"><code>buckets</code></a> operation lists them.</li>
+<li><strong>Values.</strong>  Any bytes, up to the bucket's maximum item size ({{defaultMaxItemSize}} in the default bucket).  <code>put</code> and <code>get</code> carry values as base64 text inside JSON.  <code>putraw</code> and <code>getraw</code> carry the raw bytes as the request or response body, which is 25% smaller on the wire and needs no encoding.  Both kinds of operation work on the same stored items.</li>
+<li><strong>Times.</strong>  <code>expires</code> is a Unix timestamp (seconds since 1970-01-01 UTC).  <code>ttl</code> (time to live) is a duration in seconds.</li>
+<li><strong>Lifetime.</strong>  Every item is deleted when it expires.  Reading an item never extends its lifetime.  Storing a key again replaces both its value and its expiration time.</li>
+<li><strong>Cross-origin requests.</strong>  Web pages on any site may call the API.  CORS allows every origin, without credentials.  Every operation can be called without a CORS preflight request.</li>
+<li><strong>Encryption.</strong>  The server stores exactly what it receives.  Encrypt values before storing them.  The <a href="https://github.com/bp2008/KVStore/blob/main/Client/kvstore-client.js" rel="noreferrer">reference JavaScript client</a> derives both the key and an AES-256-GCM encryption key from a single word phrase.</li>
+</ul>
+
+<h2 id="operations">Operations</h2>
+<div class="tablewrap">
+<table>
+<tr><th>Operation</th><th>What it does</th><th>Rate limits</th></tr>
+<tr><td><a href="#op-put"><code>put</code></a></td><td>Stores a value sent as base64 inside JSON.</td><td>write, bytes</td></tr>
+<tr><td><a href="#op-putraw"><code>putraw</code></a></td><td>Stores a value sent as the raw request body.</td><td>write, bytes</td></tr>
+<tr><td><a href="#op-get"><code>get</code></a></td><td>Reads a value as base64 inside JSON.</td><td>read</td></tr>
+<tr><td><a href="#op-getraw"><code>getraw</code></a></td><td>Reads a value as the raw response body.</td><td>read</td></tr>
+<tr><td><a href="#op-info"><code>info</code></a></td><td>Checks whether a value exists, without downloading it.</td><td>read</td></tr>
+<tr><td><a href="#op-del"><code>del</code></a></td><td>Deletes a value.</td><td>write</td></tr>
+<tr><td><a href="#op-buckets"><code>buckets</code></a></td><td>Lists the buckets and their limits.</td><td>none</td></tr>
+<tr><td><a href="#op-phrase"><code>phrase</code></a></td><td>Generates a random word phrase.</td><td>none</td></tr>
+<tr><td><a href="#op-health"><code>health</code></a></td><td>Reports that the service is running.</td><td>none</td></tr>
+</table>
+</div>
+
+<section class="op" id="op-put">
+<h3><span class="method">POST</span> <a class="anchor" href="#op-put">/v1/put</a> <a class="try" href="api-tester#put">Try it</a></h3>
+<p>Stores a value under a key, replacing any value already stored under that key in that bucket.</p>
+<h4>Request body (JSON)</h4>
+<div class="tablewrap">
+<table>
+<tr><th>Field</th><th>Type</th><th></th><th>Description</th></tr>
+<tr><td><code>key</code></td><td>string</td><td><span class="req">required</span></td><td>The key.</td></tr>
+<tr><td><code>value</code></td><td>string</td><td><span class="req">required</span></td><td>The value, base64-encoded.  The standard (<code>+/</code>) and URL-safe (<code>-_</code>) alphabets are both accepted, with or without <code>=</code> padding, and whitespace is ignored.  An empty string stores a zero-length value.</td></tr>
+<tr><td><code>bucket</code></td><td>string</td><td><span class="opt">optional</span></td><td>Bucket name.  Omitted, <code>null</code>, or <code>""</code> means the default bucket.</td></tr>
+<tr><td><code>ttl</code></td><td>number</td><td><span class="opt">optional</span></td><td>Requested lifetime in seconds.  Omitted or <code>null</code> means the bucket's default ({{defaultTtl}} in the default bucket).  The value is clamped to the range from 60 seconds to the bucket's maximum ({{defaultMaxTtl}} in the default bucket).</td></tr>
+</table>
+</div>
+<h4>Response</h4>
+<div class="tablewrap">
+<table>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+<tr><td><code>ok</code></td><td>boolean</td><td><code>true</code></td></tr>
+<tr><td><code>expires</code></td><td>number</td><td>When the item will be deleted (Unix time).</td></tr>
+<tr><td><code>ttl</code></td><td>number</td><td>The lifetime that was applied, in whole seconds, after clamping.</td></tr>
+<tr><td><code>size</code></td><td>number</td><td>Size of the stored value in bytes, after base64 decoding.</td></tr>
+</table>
+</div>
+<pre><code>POST /v1/put
+{"key": "k5rqgl3wbv2nqv7zm4hy6i3yaq6ln2zk", "value": "SGVsbG8=", "ttl": 600}
+
+200 OK
+{"ok": true, "expires": 1790000600, "ttl": 600, "size": 5}</code></pre>
+<p class="errors">Errors: <code>bad_request</code> (<code>key</code> or <code>value</code> is missing, <code>value</code> is not a string, or <code>ttl</code> is not a number), <code>invalid_key</code>, <code>invalid_bucket</code>, <code>invalid_value</code>, <code>unknown_bucket</code>, <code>too_large</code>, <code>rate_limited</code>, <code>bucket_disabled</code>, <code>storage_full</code>.</p>
+</section>
+
+<section class="op" id="op-putraw">
+<h3><span class="method">POST</span> <a class="anchor" href="#op-putraw">/v1/putraw</a> <a class="try" href="api-tester#putraw">Try it</a></h3>
+<p>Stores a value like <code>put</code>, but the request body is the value itself, so it needs no encoding.  The other fields are URL parameters.</p>
+<h4>URL parameters</h4>
+<div class="tablewrap">
+<table>
+<tr><th>Parameter</th><th></th><th>Description</th></tr>
+<tr><td><code>key</code></td><td><span class="req">required</span></td><td>The key.</td></tr>
+<tr><td><code>bucket</code></td><td><span class="opt">optional</span></td><td>Bucket name.  Absent or empty means the default bucket.</td></tr>
+<tr><td><code>ttl</code></td><td><span class="opt">optional</span></td><td>Requested lifetime in seconds, as a decimal number.  It is interpreted and clamped the same way as <code>put</code>'s <code>ttl</code>.</td></tr>
+</table>
+</div>
+<h4>Request body</h4>
+<p>The value's bytes, exactly as they should be stored.  An empty body stores a zero-length value.  The request must have a <code>Content-Length</code> header or use chunked transfer encoding, as HTTP clients do automatically.</p>
+<p>The <code>Content-Type</code> header is ignored.  From a browser, send no <code>Content-Type</code> (the default for a <code>Uint8Array</code> or <code>ArrayBuffer</code> body, and for a <code>Blob</code> with no type) or <code>text/plain</code>.  Any other type, such as <code>application/octet-stream</code> or a file's own type, makes the browser send a CORS preflight request first.  That still works, but it is slower.</p>
+<h4>Response</h4>
+<p>The same JSON as <a href="#op-put"><code>put</code></a>: <code>ok</code>, <code>expires</code>, <code>ttl</code>, and <code>size</code>.</p>
+<pre><code>POST /v1/putraw?key=k5rqgl3wbv2nqv7zm4hy6i3yaq6ln2zk&amp;ttl=600
+
+Hello
+
+200 OK
+{"ok": true, "expires": 1790000600, "ttl": 600, "size": 5}</code></pre>
+<p class="errors">Errors: <code>bad_request</code> (<code>key</code> is missing, <code>ttl</code> is not a number, or the upload ended early), <code>invalid_key</code>, <code>invalid_bucket</code>, <code>unknown_bucket</code>, <code>too_large</code>, <code>rate_limited</code>, <code>bucket_disabled</code>, <code>storage_full</code>.</p>
+</section>
+
+<section class="op" id="op-get">
+<h3><span class="method">POST</span> <a class="anchor" href="#op-get">/v1/get</a> <a class="try" href="api-tester#get">Try it</a></h3>
+<p>Reads a value.</p>
+<h4>Request body (JSON)</h4>
+<div class="tablewrap">
+<table>
+<tr><th>Field</th><th>Type</th><th></th><th>Description</th></tr>
+<tr><td><code>key</code></td><td>string</td><td><span class="req">required</span></td><td>The key.</td></tr>
+<tr><td><code>bucket</code></td><td>string</td><td><span class="opt">optional</span></td><td>Bucket name.  Omitted, <code>null</code>, or <code>""</code> means the default bucket.</td></tr>
+</table>
+</div>
+<h4>Response</h4>
+<div class="tablewrap">
+<table>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+<tr><td><code>ok</code></td><td>boolean</td><td><code>true</code></td></tr>
+<tr><td><code>value</code></td><td>string</td><td>The value, base64-encoded with the standard alphabet and <code>=</code> padding.</td></tr>
+<tr><td><code>expires</code></td><td>number</td><td>When the item will be deleted (Unix time).</td></tr>
+<tr><td><code>size</code></td><td>number</td><td>Size of the value in bytes.</td></tr>
+</table>
+</div>
+<pre><code>POST /v1/get
+{"key": "k5rqgl3wbv2nqv7zm4hy6i3yaq6ln2zk"}
+
+200 OK
+{"ok": true, "expires": 1790000600, "size": 5, "value": "SGVsbG8="}</code></pre>
+<p class="errors">Errors: <code>bad_request</code> (<code>key</code> is missing), <code>invalid_key</code>, <code>invalid_bucket</code>, <code>not_found</code> (nothing is stored under this key in this bucket, or it has expired), <code>unknown_bucket</code>, <code>rate_limited</code>, <code>bucket_disabled</code>.</p>
+</section>
+
+<section class="op" id="op-getraw">
+<h3><span class="method">POST</span> <a class="anchor" href="#op-getraw">/v1/getraw</a> <a class="try" href="api-tester#getraw">Try it</a></h3>
+<p>Reads a value like <code>get</code>, but the response body is the value itself.</p>
+<h4>Request body (JSON)</h4>
+<p>The same as <a href="#op-get"><code>get</code></a>: <code>key</code> (required) and <code>bucket</code> (optional).</p>
+<h4>Response</h4>
+<p>On success, the status is <code>200</code> and the body is the value's bytes, with these headers:</p>
+<div class="tablewrap">
+<table>
+<tr><th>Header</th><th>Description</th></tr>
+<tr><td><code>Content-Type</code></td><td>Always <code>application/octet-stream</code>.</td></tr>
+<tr><td><code>KV-Expires</code></td><td>When the item will be deleted (Unix time).</td></tr>
+<tr><td><code>KV-Size</code></td><td>Size of the value in bytes (the same as <code>Content-Length</code>).</td></tr>
+</table>
+</div>
+<p>On failure, the response is the usual JSON error with a status other than <code>200</code>.  Check the status before treating the body as the value.</p>
+<pre><code>POST /v1/getraw
+{"key": "k5rqgl3wbv2nqv7zm4hy6i3yaq6ln2zk"}
+
+200 OK
+Content-Type: application/octet-stream
+KV-Expires: 1790000600
+KV-Size: 5
+
+Hello</code></pre>
+<p class="errors">Errors: the same as <a href="#op-get"><code>get</code></a>.</p>
+</section>
+
+<section class="op" id="op-info">
+<h3><span class="method">POST</span> <a class="anchor" href="#op-info">/v1/info</a> <a class="try" href="api-tester#info">Try it</a></h3>
+<p>Reports whether a value exists, and its size and expiration time, without downloading it.  This lets a device wait for another device's upload cheaply.</p>
+<h4>Request body (JSON)</h4>
+<p>The same as <a href="#op-get"><code>get</code></a>: <code>key</code> (required) and <code>bucket</code> (optional).</p>
+<h4>Response</h4>
+<div class="tablewrap">
+<table>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+<tr><td><code>ok</code></td><td>boolean</td><td><code>true</code></td></tr>
+<tr><td><code>exists</code></td><td>boolean</td><td><code>true</code> if a value is stored under this key in this bucket and has not expired.  A missing value is not an error.</td></tr>
+<tr><td><code>expires</code></td><td>number</td><td>When the item will be deleted (Unix time).  Only present if <code>exists</code> is <code>true</code>.</td></tr>
+<tr><td><code>size</code></td><td>number</td><td>Size of the value in bytes.  Only present if <code>exists</code> is <code>true</code>.</td></tr>
+</table>
+</div>
+<p class="errors">Errors: <code>bad_request</code> (<code>key</code> is missing), <code>invalid_key</code>, <code>invalid_bucket</code>, <code>unknown_bucket</code>, <code>rate_limited</code>, <code>bucket_disabled</code>.</p>
+</section>
+
+<section class="op" id="op-del">
+<h3><span class="method">POST</span> <a class="anchor" href="#op-del">/v1/del</a> <a class="try" href="api-tester#del">Try it</a></h3>
+<p>Deletes a value immediately.</p>
+<h4>Request body (JSON)</h4>
+<p>The same as <a href="#op-get"><code>get</code></a>: <code>key</code> (required) and <code>bucket</code> (optional).</p>
+<h4>Response</h4>
+<div class="tablewrap">
+<table>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+<tr><td><code>ok</code></td><td>boolean</td><td><code>true</code></td></tr>
+<tr><td><code>deleted</code></td><td>boolean</td><td><code>true</code> if a value was deleted.  <code>false</code> if there was nothing to delete: the key was never used in this bucket, or its value was already deleted or has expired.</td></tr>
+</table>
+</div>
+<p class="errors">Errors: <code>bad_request</code> (<code>key</code> is missing), <code>invalid_key</code>, <code>invalid_bucket</code>, <code>unknown_bucket</code>, <code>rate_limited</code>, <code>bucket_disabled</code>.</p>
+</section>
+
+<section class="op" id="op-buckets">
+<h3><span class="method">POST</span> <a class="anchor" href="#op-buckets">/v1/buckets</a> <a class="try" href="api-tester#buckets">Try it</a></h3>
+<p>Lists the buckets that are currently enabled, and their limits.</p>
+<h4>Request body (JSON)</h4>
+<p><code>{}</code>, or an empty body.  There are no fields.</p>
+<h4>Response</h4>
+<div class="tablewrap">
+<table>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+<tr><td><code>ok</code></td><td>boolean</td><td><code>true</code></td></tr>
+<tr><td><code>defaultBucket</code></td><td>string</td><td>Name of the bucket used when a request does not name one.</td></tr>
+<tr><td><code>buckets</code></td><td>array</td><td>One object per bucket, with these fields:
+	<br><code>name</code> (string): the bucket's name.
+	<br><code>maxItemSizeBytes</code> (number): the largest value the bucket accepts, in bytes.
+	<br><code>defaultTtl</code> (number): the lifetime used when a request does not ask for one, in seconds.
+	<br><code>maxTtl</code> (number): the longest lifetime the bucket allows, in seconds.</td></tr>
+</table>
+</div>
+</section>
+
+<section class="op" id="op-phrase">
+<h3><span class="method">POST</span> <a class="anchor" href="#op-phrase">/v1/phrase</a> <a class="try" href="api-tester#phrase">Try it</a></h3>
+<p>Returns random words from the <a href="https://www.eff.org/dice" rel="noreferrer">EFF short wordlist #1</a>, for use as a secret that is easy to type.  Nothing is recorded.  Generating phrases on your own device is preferred.</p>
+<h4>Request body (JSON)</h4>
+<div class="tablewrap">
+<table>
+<tr><th>Field</th><th>Type</th><th></th><th>Description</th></tr>
+<tr><td><code>words</code></td><td>number</td><td><span class="opt">optional</span></td><td>Number of words: a whole number from 5 to 10.  Omitted or <code>null</code> means 6.  Six words (about 62 bits) is the recommended minimum.</td></tr>
+</table>
+</div>
+<h4>Response</h4>
+<div class="tablewrap">
+<table>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+<tr><td><code>ok</code></td><td>boolean</td><td><code>true</code></td></tr>
+<tr><td><code>phrase</code></td><td>string</td><td>Lower-case words separated by hyphens, e.g. <code>crop-visor-quilt-nomad-brave-flint</code>.  One word in the list, <code>yo-yo</code>, contains a hyphen itself.</td></tr>
+</table>
+</div>
+<p class="errors">Errors: <code>bad_request</code> (<code>words</code> is not a whole number from 5 to 10).</p>
+</section>
+
+<section class="op" id="op-health">
+<h3><span class="method get">GET</span> <a class="anchor" href="#op-health">/v1/health</a> <a class="try" href="api-tester#health">Try it</a></h3>
+<p>Reports that the service is running.  There is no request body.</p>
+<h4>Response</h4>
+<div class="tablewrap">
+<table>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+<tr><td><code>ok</code></td><td>boolean</td><td><code>true</code></td></tr>
+<tr><td><code>version</code></td><td>string</td><td>The server's version.</td></tr>
+<tr><td><code>uptime</code></td><td>number</td><td>Seconds since the service started.</td></tr>
+</table>
+</div>
+</section>
+
+<h2 id="errors">Errors</h2>
+<p>A failed request has an HTTP error status and a body like <code>{"ok": false, "error": "not_found"}</code>.</p>
+<div class="tablewrap">
+<table>
+<tr><th>HTTP</th><th><code>error</code></th><th>Meaning</th></tr>
+<tr><td>400</td><td><code>bad_request</code></td><td>The body is not valid JSON, a required field or parameter is missing, or a field has the wrong type.</td></tr>
+<tr><td>400</td><td><code>invalid_key</code></td><td>The key is not in a valid format.</td></tr>
+<tr><td>400</td><td><code>invalid_bucket</code></td><td>The bucket name is not in a valid format.</td></tr>
+<tr><td>400</td><td><code>invalid_value</code></td><td>The value is not valid base64 (<code>put</code> only).</td></tr>
+<tr><td>404</td><td><code>not_found</code></td><td>Nothing is stored under this key in this bucket, or it has expired.</td></tr>
+<tr><td>404</td><td><code>unknown_bucket</code></td><td>There is no bucket with this name.</td></tr>
+<tr><td>404</td><td><code>unknown_endpoint</code></td><td>There is no operation with this name.</td></tr>
+<tr><td>405</td><td><code>method_not_allowed</code></td><td>Wrong HTTP method.  Use <code>POST</code>, or <code>GET</code> for <code>health</code>.</td></tr>
+<tr><td>413</td><td><code>too_large</code></td><td>The value is larger than the bucket's maximum item size.</td></tr>
+<tr><td>429</td><td><code>rate_limited</code></td><td>Too many requests.  Wait for the number of seconds in the <code>Retry-After</code> header.</td></tr>
+<tr><td>503</td><td><code>bucket_disabled</code></td><td>The operator has disabled this bucket.</td></tr>
+<tr><td>503</td><td><code>storage_full</code></td><td>The bucket or the server is out of space.  Try again later.</td></tr>
+<tr><td>500</td><td><code>internal_error</code></td><td>An unexpected server error.  The response also has a <code>correlationId</code>.</td></tr>
+</table>
+</div>
+
+<h2 id="limits">Rate limits</h2>
+<p>Requests are limited per client network: one IPv4 address, or one IPv6 /64 prefix.  Each limit allows a burst, then refills gradually.  A request over a limit is answered with <code>429 rate_limited</code>.</p>
+<div class="tablewrap">
+<table>
+<tr><th>Limit</th><th>Counts</th><th>Allowance</th></tr>
+<tr><td>Writes</td><td><code>put</code>, <code>putraw</code>, <code>del</code></td><td>{{writeLimit}}</td></tr>
+<tr><td>Reads</td><td><code>get</code>, <code>getraw</code>, <code>info</code></td><td>{{readLimit}}</td></tr>
+<tr><td>Stored data</td><td>Bytes stored by <code>put</code> and <code>putraw</code></td><td>{{byteLimit}}</td></tr>
+</table>
+</div>
+</main>
+</body>
+</html>

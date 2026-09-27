@@ -11,17 +11,17 @@ namespace KVStore
 	public class RateLimitSettings
 	{
 		/// <summary>
-		/// Consumed by "put" and "del" (1 token per request).  Default: 10 tokens, refilled at 60 per hour.
+		/// Consumed by "put", "putraw", and "del" (1 token per request).  Default: 10 tokens, refilled at 60 per hour.
 		/// </summary>
 		public TokenBucketSettings writes = new TokenBucketSettings(10, 60.0 / 3600);
 		/// <summary>
-		/// Consumed by "get" and "info" (1 token per request).  Default: 30 tokens, refilled at 600 per hour.
+		/// Consumed by "get", "getraw", and "info" (1 token per request).  Default: 30 tokens, refilled at 600 per hour.
 		/// </summary>
 		public TokenBucketSettings reads = new TokenBucketSettings(30, 600.0 / 3600);
 		/// <summary>
-		/// Consumed by "put" (1 token per stored byte).  Default: 10 MiB, refilled at 10 MiB per day.
+		/// Consumed by "put" and "putraw" (1 token per stored byte).  Default: 10 MiB, refilled at 60 MiB per hour (a full refill takes 10 minutes).
 		/// </summary>
-		public TokenBucketSettings bytes = new TokenBucketSettings(10485760, 10485760.0 / 86400);
+		public TokenBucketSettings bytes = new TokenBucketSettings(10485760, 10485760.0 * 6 / 3600);
 		/// <summary>
 		/// Maximum number of clients that each rate limiter will track at once.  When a rate limiter is tracking this many clients, requests from clients it is not already tracking are refused with "429 rate_limited" rather than allocating more memory.
 		/// </summary>
@@ -37,7 +37,7 @@ namespace KVStore
 			if (reads == null)
 				reads = new TokenBucketSettings(30, 600.0 / 3600);
 			if (bytes == null)
-				bytes = new TokenBucketSettings(10485760, 10485760.0 / 86400);
+				bytes = new TokenBucketSettings(10485760, 10485760.0 * 6 / 3600);
 			writes.Repair();
 			reads.Repair();
 			bytes.Repair();

@@ -96,9 +96,9 @@
 					<table>
 						<thead><tr><th>Limiter</th><th>Capacity (tokens)</th><th>Refill (tokens per hour)</th><th>Consumed by</th></tr></thead>
 						<tbody>
-							<tr><td>Writes</td><td><input type="number" id="rl_writes_capacity" min="1" step="any" required></td><td><input type="number" id="rl_writes_refill" min="0.001" step="any" required></td><td>put, del (1 each)</td></tr>
-							<tr><td>Reads</td><td><input type="number" id="rl_reads_capacity" min="1" step="any" required></td><td><input type="number" id="rl_reads_refill" min="0.001" step="any" required></td><td>get, info (1 each)</td></tr>
-							<tr><td>Bytes</td><td><input type="number" id="rl_bytes_capacity" min="1" step="any" required></td><td><input type="number" id="rl_bytes_refill" min="0.001" step="any" required></td><td>put (1 per byte stored)</td></tr>
+							<tr><td>Writes</td><td><input type="number" id="rl_writes_capacity" min="1" step="any" required></td><td><input type="number" id="rl_writes_refill" min="0.001" step="any" required></td><td>put, putraw, del (1 each)</td></tr>
+							<tr><td>Reads</td><td><input type="number" id="rl_reads_capacity" min="1" step="any" required></td><td><input type="number" id="rl_reads_refill" min="0.001" step="any" required></td><td>get, getraw, info (1 each)</td></tr>
+							<tr><td>Bytes</td><td><input type="number" id="rl_bytes_capacity" min="1" step="any" required></td><td><input type="number" id="rl_bytes_refill" min="0.001" step="any" required></td><td>put, putraw (1 per byte stored)</td></tr>
 						</tbody>
 					</table>
 				</div>

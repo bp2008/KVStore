@@ -40,7 +40,7 @@
 			el.hidden = el.getAttribute("data-for").split(" ").indexOf(op) === -1;
 		});
 		$("opDesc").textContent = ops[op];
-		$("opDocs").href = "./#op-" + op;
+		$("opDocs").href = "api#op-" + op;
 		var fmt = valueFormat();
 		$("valueText").hidden = fmt === "file";
 		$("valueFile").hidden = fmt !== "file";

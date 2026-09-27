@@ -8,7 +8,7 @@
 		<GenerateAssemblyInfo>True</GenerateAssemblyInfo>
 		<!-- Pin PackageId before AssemblyName is overridden per-TFM below; Visual Studio's NuGet restore fails (NU1105) if PackageId differs across target frameworks. -->
 		<PackageId>$(AssemblyName)</PackageId>
-		<Version>1.1.0</Version>
+		<Version>1.2.0</Version>
 	</PropertyGroup>
 	
 	<!-- Windows build: WinForms service/tray UI. Output assembly is "KVStore.dll". -->

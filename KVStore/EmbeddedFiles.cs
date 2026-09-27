@@ -67,16 +67,5 @@ namespace KVStore
 			}
 			return true;
 		}
-		/// <summary>
-		/// Gets the named file as UTF-8 text.  Throws if there is no such file.
-		/// </summary>
-		/// <param name="fileName">File name, e.g. "index.html".</param>
-		/// <returns></returns>
-		public string GetText(string fileName)
-		{
-			if (!files.Value.TryGetValue(fileName, out byte[] body))
-				throw new FileNotFoundException("Embedded file \"" + resourcePrefix + fileName + "\" was not found.");
-			return Encoding.UTF8.GetString(body);
-		}
 	}
 }

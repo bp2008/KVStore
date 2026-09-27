@@ -57,7 +57,7 @@ The Windows build (`KVStore.exe`) opens a service manager window with Install/St
 
 All endpoints are under `/v1/`.  Key/value operations are `POST` requests with a JSON body and a JSON response, except `putraw` and `getraw`, which carry the value as raw bytes.  Browsers should send `Content-Type: text/plain;charset=UTF-8`, which is CORS-safelisted, so no preflight request is needed; the body is parsed as JSON regardless of the declared content type.  CORS allows any origin, without credentials.
 
-The public landing page (`/`) documents every operation's fields in detail, and links to a browser-based API tester (`/api-tester`) and a self-service takedown form (`/takedown`).
+The API documentation page (`/api`) describes every operation's fields in detail.  The public site also has a browser-based API tester (`/api-tester`) and a self-service takedown form (`/takedown`).
 
 | Endpoint | Request body | Success response |
 |---|---|---|
@@ -96,7 +96,7 @@ Errors are reported as `{ "ok": false, "error": "<code>" }`:
 | 503 | `storage_full` | Bucket quota reached and eviction could not make room, or the disk is nearly full |
 | 500 | `internal_error` | Unexpected error; the response includes a `correlationId` that appears in the server's error log |
 
-Requests are rate-limited per client (IPv4 address, or IPv6 /64 prefix).  By default: 10 writes (`put`, `putraw`, `del`) refilled at 60/hour, 30 reads (`get`, `getraw`, `info`) refilled at 600/hour, and 10 MiB of stored data refilled at 10 MiB/day.
+Requests are rate-limited per client (IPv4 address, or IPv6 /64 prefix).  By default: 10 writes (`put`, `putraw`, `del`) refilled at 60/hour, 30 reads (`get`, `getraw`, `info`) refilled at 600/hour, and 10 MiB of stored data refilled at 60 MiB/hour (a full refill takes 10 minutes).
 
 ## Client-side encryption
 

@@ -699,11 +699,11 @@ namespace KVStore
 				p.Response.Simple("405 Method Not Allowed");
 				p.Response.Headers["Allow"] = "GET, HEAD";
 			}
-			else if (page == "")
-				p.Response.FullResponseUTF8(LandingPage.GetHtml(engine.GetSettings()), "text/html; charset=utf-8");
 			else if (page.IEquals("robots.txt"))
 				p.Response.FullResponseUTF8("User-agent: *\nDisallow: /\n", "text/plain; charset=utf-8");
-			else if (TryGetSiteFile(page, out byte[] body, out string contentType))
+			else if (PublicPages.GetHtml(page, engine.GetSettings()) is string html)
+				p.Response.FullResponseUTF8(html, "text/html; charset=utf-8");
+			else if (TryGetSiteAsset(page, out byte[] body, out string contentType))
 				p.Response.FullResponseBytes(body, contentType);
 			else
 				p.Response.Simple("404 Not Found");
@@ -717,17 +717,12 @@ namespace KVStore
 			h["Content-Security-Policy"] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 		}
 		/// <summary>
-		/// Gets a file of the public web pages (see the "PublicSite" folder).  Pages are requested without their ".html" extension, e.g. "/takedown".  "index.html" is the landing page template, which is only served (filled in) at "/".
+		/// Gets a stylesheet or script used by the public web pages (see the "PublicSite" folder).  The pages themselves are built by <see cref="PublicPages"/>.
 		/// </summary>
-		private static bool TryGetSiteFile(string page, out byte[] body, out string contentType)
+		private static bool TryGetSiteAsset(string page, out byte[] body, out string contentType)
 		{
 			string lower = page.ToLowerInvariant();
-			string fileName = null;
-			if (lower.EndsWith(".css") || lower.EndsWith(".js"))
-				fileName = page;
-			else if (lower != "index" && !lower.Contains('.'))
-				fileName = page + ".html";
-			if (fileName != null && EmbeddedFiles.PublicSite.TryGet(fileName, out body, out contentType))
+			if ((lower.EndsWith(".css") || lower.EndsWith(".js")) && EmbeddedFiles.PublicSite.TryGet(page, out body, out contentType))
 				return true;
 			body = null;
 			contentType = null;
